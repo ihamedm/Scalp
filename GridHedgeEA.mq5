@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Hamed Movasaqpoor"
 #property link      "hamed.movasaqpoor@gmail.com"
-#property version   "6.7"
+#property version   "6.8"
 
 #include <Trade\Trade.mqh>
 
@@ -47,7 +47,9 @@ input group "=== معاملات ==="
 input double FixedLot          = 0.01;     // حجم ثابت هر پله لات
 input double SL_Points         = 0;        // حد ضرر هر پله (Point)
 input double TP_Points         = 100.0;    // حد سود هر پله (Point)
-input int    GridLevels        = 1;         // تعداد پله های اولیه
+input int    GridLevels        = 1;         // تعداد پله های اولیه (استفاده برای سازگاری با قبل)
+input int    GridLevelsBuy     = 0;         // تعداد پله های خرید اولیه (0 = غیرفعال)
+input int    GridLevelsSell    = 0;         // تعداد پله های فروش اولیه (0 = غیرفعال)
 input double GridStep_Points   = 100.0;     // فاصله پله ها (Point)
 input double TotalProfitTarget = 40.0;     // هدف سود کل (دلار)
 input double TotalStopLoss     = -100.0;    // حد ضرر کل (عدد منفی، دلار)
@@ -104,6 +106,7 @@ int    g_LiveTrendDirection = -1; // جهت زنده برای نمایش و تص
 datetime g_LastTrendRefreshTime = 0;
 int    g_MidTrendDirection = -1;  // جهت زنده روند میان‌مدت
 datetime g_LastMidTrendRefreshTime = 0;
+bool   g_SymmetricMode = false;   // آیا حالت متقارن (خرید + فروش) فعال است؟
 datetime g_LastTrendNotificationTime = 0;
 string g_LastTrendNotificationKey = "";
 int    g_OrderCommentSeq = 0;    // شماره سفارش داخل شبکه جاری
@@ -170,6 +173,7 @@ void SaveState()
    GlobalVariableSet(GVarName("EnableCamarillaRangeCheck"), g_EnableCamarillaRangeCheck ? 1.0 : 0.0);
    GlobalVariableSet(GVarName("g_CamarillaRange"), (double)g_CamarillaRange);
    GlobalVariableSet(GVarName("TrailingActivation"), g_TrailingActivation);
+   GlobalVariableSet(GVarName("g_SymmetricMode"), g_SymmetricMode ? 1.0 : 0.0);
    Print("📌 EA state saved to GlobalVariables.");
   }
 
@@ -206,6 +210,9 @@ bool LoadState()
    g_TrailingActivation = GlobalVariableCheck(GVarName("TrailingActivation"))
                           ? GlobalVariableGet(GVarName("TrailingActivation"))
                           : TrailingActivation;
+   g_SymmetricMode = GlobalVariableCheck(GVarName("g_SymmetricMode"))
+                          ? (GlobalVariableGet(GVarName("g_SymmetricMode")) >= 0.5)
+                          : false;
 
   // بازسازی g_CurrentLot بر اساس شاخص ذخیره شده
    if(g_CurrentLotIndex >= 0 && g_CurrentLotIndex < ArraySize(g_LotSteps))
@@ -226,7 +233,7 @@ bool LoadState()
 void ClearState()
   {
    string prefix = "GridHedge~" + _Symbol + "~" + IntegerToString(MagicNumber) + "~";
-   string names[] = {"inited","g_GridInstance","g_ActiveMagic","isTradingActive","tradingDone","buyExpansionCount","sellExpansionCount","lastBuyPosCount","lastSellPosCount","lastBuyExpansionPrice","lastSellExpansionPrice","g_MaxBuyExpansions","g_MaxSellExpansions","g_ActualGridStep","g_CurrentLot","g_CurrentLotIndex","g_OrderCommentSeq","EnableCamarillaCheck","EnableCamarillaRangeCheck","g_CamarillaRange"};
+   string names[] = {"inited","g_GridInstance","g_ActiveMagic","isTradingActive","tradingDone","buyExpansionCount","sellExpansionCount","lastBuyPosCount","lastSellPosCount","lastBuyExpansionPrice","lastSellExpansionPrice","g_MaxBuyExpansions","g_MaxSellExpansions","g_ActualGridStep","g_CurrentLot","g_CurrentLotIndex","g_OrderCommentSeq","EnableCamarillaCheck","EnableCamarillaRangeCheck","g_CamarillaRange","g_SymmetricMode"};
    for(int i=0;i<ArraySize(names);i++) GlobalVariableDel(prefix + names[i]);
    Print("📌 Cleared persisted EA state.");
   }
@@ -787,10 +794,22 @@ void StartGridByButton()
      }
    Print("▶ ایجاد شبکه جدید...");
    
-   // ارسال لاگ شروع شبکه و پارامترهای اولیه
-   string gridInfo = StringFormat("Grid started | Symbol: %s | LotSize: %.3f | GridStep: %.2f | Levels: %d",
-                                  _Symbol, g_CurrentLot, GridStep_Points, GridLevels);
-   SendLogToServer("INFO", gridInfo);
+   // تشخیص حالت
+   if(GridLevelsBuy > 0 && GridLevelsSell > 0)
+     {
+      string gridInfo = StringFormat("Grid started (Symmetric) | Symbol: %s | LotSize: %.3f | GridStep: %.2f | Buy Levels: %d | Sell Levels: %d",
+                                     _Symbol, g_CurrentLot, GridStep_Points, GridLevelsBuy, GridLevelsSell);
+      Print(gridInfo);
+      SendLogToServer("INFO", gridInfo);
+     }
+   else
+     {
+      string gridInfo = StringFormat("Grid started (Single) | Symbol: %s | LotSize: %.3f | GridStep: %.2f | Levels: %d",
+                                     _Symbol, g_CurrentLot, GridStep_Points, GridLevels);
+      Print(gridInfo);
+      SendLogToServer("INFO", gridInfo);
+     }
+   
    UpdateParamOnServer("GridActive", 1.0);
    UpdateParamOnServer("LotSize", g_CurrentLot);
    
@@ -834,35 +853,58 @@ void ExecuteStrategy()
    PrepareGridCommentContext();
    ResetTrailingState();
 
-   int direction = -1;
-   if(UseManualDirection)
-     {
-      direction = (DirectionChoice == 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-      Print("جهت دستی: ", direction == ORDER_TYPE_BUY ? "خرید ▲" : "فروش ▼");
-     }
-   else
-     {
-      direction = DetectTrendFromEMA(ShortTrendTF, g_TrendStrength);
-      Print("جهت EMA(", TrendMAPeriod, "): ", direction == ORDER_TYPE_BUY ? "خرید ▲" : "فروش ▼");
-     }
-
+   // بررسی حالت متقارن (خرید و فروش همزمان)
+   g_SymmetricMode = (GridLevelsBuy > 0 && GridLevelsSell > 0);
+   
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   
 
-   if(direction == ORDER_TYPE_BUY)
+   if(g_SymmetricMode)
      {
-      g_GridDirection = direction;
-      double sl = (SL_Points > 0) ? PointToPrice(ask, SL_Points, true,  true) : 0;
-      double tp = (TP_Points > 0) ? PointToPrice(ask, TP_Points, false, true) : 0;
-      PlaceInitialLimit(ORDER_TYPE_BUY, g_CurrentLot, sl, tp, "اولیه");
+      // حالت متقارن: خرید و فروش را همزمان شروع کن
+      Print("🔄 حالت متقارن فعال: خرید(", GridLevelsBuy, ") + فروش(", GridLevelsSell, ")");
+      
+      // پله اول خرید
+      double sl_buy = (SL_Points > 0) ? PointToPrice(ask, SL_Points, true,  true) : 0;
+      double tp_buy = (TP_Points > 0) ? PointToPrice(ask, TP_Points, false, true) : 0;
+      PlaceInitialLimit(ORDER_TYPE_BUY, g_CurrentLot, sl_buy, tp_buy, "اولیه");
+      
+      // پله اول فروش
+      double sl_sell = (SL_Points > 0) ? PointToPrice(bid, SL_Points, true,  false) : 0;
+      double tp_sell = (TP_Points > 0) ? PointToPrice(bid, TP_Points, false, false) : 0;
+      PlaceInitialLimit(ORDER_TYPE_SELL, g_CurrentLot, sl_sell, tp_sell, "اولیه");
+      
+      g_GridDirection = -1; // حالت خاص: هر دو سمت
      }
    else
      {
-      g_GridDirection = direction;
-      double sl = (SL_Points > 0) ? PointToPrice(bid, SL_Points, true,  false) : 0;
-      double tp = (TP_Points > 0) ? PointToPrice(bid, TP_Points, false, false) : 0;
-      PlaceInitialLimit(ORDER_TYPE_SELL, g_CurrentLot, sl, tp, "اولیه");
+      // حالت عادی: یک جهت را انتخاب کن
+      int direction = -1;
+      if(UseManualDirection)
+        {
+         direction = (DirectionChoice == 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+         Print("جهت دستی: ", direction == ORDER_TYPE_BUY ? "خرید ▲" : "فروش ▼");
+        }
+      else
+        {
+         direction = DetectTrendFromEMA(ShortTrendTF, g_TrendStrength);
+         Print("جهت EMA(", TrendMAPeriod, "): ", direction == ORDER_TYPE_BUY ? "خرید ▲" : "فروش ▼");
+        }
+
+      if(direction == ORDER_TYPE_BUY)
+        {
+         g_GridDirection = direction;
+         double sl = (SL_Points > 0) ? PointToPrice(ask, SL_Points, true,  true) : 0;
+         double tp = (TP_Points > 0) ? PointToPrice(ask, TP_Points, false, true) : 0;
+         PlaceInitialLimit(ORDER_TYPE_BUY, g_CurrentLot, sl, tp, "اولیه");
+        }
+      else
+        {
+         g_GridDirection = direction;
+         double sl = (SL_Points > 0) ? PointToPrice(bid, SL_Points, true,  false) : 0;
+         double tp = (TP_Points > 0) ? PointToPrice(bid, TP_Points, false, false) : 0;
+         PlaceInitialLimit(ORDER_TYPE_SELL, g_CurrentLot, sl, tp, "اولیه");
+        }
      }
 
    PlaceGrid();
@@ -1115,15 +1157,15 @@ void CheckTrendStrengthNotification()
   }
 
 //+------------------------------------------------------------------+
-//| Limit Order اولیه                                                |
+//| سفارش اولیه شبکه (Stop به جای Limit)                            |
 //+------------------------------------------------------------------+
 bool PlaceInitialLimit(ENUM_ORDER_TYPE type, double lot, double sl, double tp, string comment)
   {
    Sleep(30);
    double halfStep = (GridStep_Points / 2.0) * _Point;
    double price = (type == ORDER_TYPE_BUY)
-                  ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) - halfStep
-                  : SymbolInfoDouble(_Symbol, SYMBOL_BID) + halfStep;
+                  ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) + halfStep
+                  : SymbolInfoDouble(_Symbol, SYMBOL_BID) - halfStep;
    price = NormalizePriceToTick(price);
    bool isBuy = (type == ORDER_TYPE_BUY);
    
@@ -1138,10 +1180,10 @@ bool PlaceInitialLimit(ENUM_ORDER_TYPE type, double lot, double sl, double tp, s
    tp = (TP_Points > 0) ? ProtectionPriceFromEntry(price, TP_Points, false, isBuy) : 0;
 
    // proximity check using dynamic factor
-   ENUM_ORDER_TYPE checkType = (type == ORDER_TYPE_BUY) ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   ENUM_ORDER_TYPE checkType = (type == ORDER_TYPE_BUY) ? ORDER_TYPE_BUY_STOP : ORDER_TYPE_SELL_STOP;
    if(IsTooCloseToExisting(price, checkType))
      {
-      PrintFormat("⛔ جلوگیری از ثبت Limit اولیه - خیلی نزدیک به سفارش/پوزیشن موجود (price=%.5f)", price);
+      PrintFormat("⛔ جلوگیری از ثبت سفارش اولیه - خیلی نزدیک به سفارش/پوزیشن موجود (price=%.5f)", price);
       return false;
      }
 
@@ -1168,7 +1210,7 @@ bool PlaceInitialLimit(ENUM_ORDER_TYPE type, double lot, double sl, double tp, s
    req.symbol       = _Symbol;
    req.volume       = lot;
    req.price        = price;
-   req.type         = (type == ORDER_TYPE_BUY) ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   req.type         = (type == ORDER_TYPE_BUY) ? ORDER_TYPE_BUY_STOP : ORDER_TYPE_SELL_STOP;
    req.sl           = sl;
    req.tp           = tp;
    req.magic        = g_ActiveMagic;
@@ -1198,12 +1240,16 @@ void PlaceGrid()
    double minDist  = (stopsLvl + 2) * _Point;
    double step     = GridStep_Points * _Point;
 
+   // تعیین تعداد پله‌های واقعی
+   int actualBuyLevels = (GridLevelsBuy > 0) ? GridLevelsBuy : GridLevels;
+   int actualSellLevels = (GridLevelsSell > 0) ? GridLevelsSell : GridLevels;
+
    // ثبت فقط سفارش‌های هم‌جهت با جهت اولیه شبکه
    // لاحظ: سفارش اولیه (Initial Limit) قبلاً برای پله ۱ ثبت شده است
    // بنابراین سفارش‌های گرید اضافی باید از پله ۲ شروع شوند
    if(g_GridDirection == ORDER_TYPE_BUY)
      {
-      for(int i = 2; i <= GridLevels; i++)
+      for(int i = 2; i <= actualBuyLevels; i++)
         {
          double entry = ask + i * step;
          if(entry - ask < minDist) entry = ask + minDist;
@@ -1215,7 +1261,7 @@ void PlaceGrid()
      }
    else if(g_GridDirection == ORDER_TYPE_SELL)
      {
-      for(int i = 2; i <= GridLevels; i++)
+      for(int i = 2; i <= actualSellLevels; i++)
         {
          double entry = bid - i * step;
          if(bid - entry < minDist) entry = bid - minDist;
@@ -1225,29 +1271,36 @@ void PlaceGrid()
          PlacePendingOrder(ORDER_TYPE_SELL_STOP, lot, entry, sl, tp, "فروش");
         }
      }
-   else
+   else // حالت متقارن: هر دو سمت را ثبت کن
      {
-      // اگر جهت مشخص نشده بود، رفتار قدیمی: هر دو سمت را ثبت کن (از پله ۲)
-      for(int i = 2; i <= GridLevels; i++)
+      int maxLevels = MathMax(actualBuyLevels, actualSellLevels);
+      for(int i = 2; i <= maxLevels; i++)
         {
-         double entry = ask + i * step;
-         if(entry - ask < minDist) entry = ask + minDist;
-         double lot = CalcLot(SL_Points);
-         double sl  = (SL_Points > 0) ? PointToPrice(entry, SL_Points, true,  true) : 0;
-         double tp  = (TP_Points > 0) ? PointToPrice(entry, TP_Points, false, true) : 0;
-         PlacePendingOrder(ORDER_TYPE_BUY_STOP, lot, entry, sl, tp, "خرید");
-        }
-      for(int i = 2; i <= GridLevels; i++)
-        {
-         double entry = bid - i * step;
-         if(bid - entry < minDist) entry = bid - minDist;
-         double lot = CalcLot(SL_Points);
-         double sl  = (SL_Points > 0) ? PointToPrice(entry, SL_Points, true,  false) : 0;
-         double tp  = (TP_Points > 0) ? PointToPrice(entry, TP_Points, false, false) : 0;
-         PlacePendingOrder(ORDER_TYPE_SELL_STOP, lot, entry, sl, tp, "فروش");
+         if(i <= actualBuyLevels)
+           {
+            double entry = ask + i * step;
+            if(entry - ask < minDist) entry = ask + minDist;
+            double lot = CalcLot(SL_Points);
+            double sl  = (SL_Points > 0) ? PointToPrice(entry, SL_Points, true,  true) : 0;
+            double tp  = (TP_Points > 0) ? PointToPrice(entry, TP_Points, false, true) : 0;
+            PlacePendingOrder(ORDER_TYPE_BUY_STOP, lot, entry, sl, tp, "خرید");
+           }
+         if(i <= actualSellLevels)
+           {
+            double entry = bid - i * step;
+            if(bid - entry < minDist) entry = bid - minDist;
+            double lot = CalcLot(SL_Points);
+            double sl  = (SL_Points > 0) ? PointToPrice(entry, SL_Points, true,  false) : 0;
+            double tp  = (TP_Points > 0) ? PointToPrice(entry, TP_Points, false, false) : 0;
+            PlacePendingOrder(ORDER_TYPE_SELL_STOP, lot, entry, sl, tp, "فروش");
+           }
         }
      }
-   Print("✅ شبکه اولیه ثبت شد.");
+   
+   if(g_SymmetricMode)
+      PrintFormat("✅ شبکه متقارن ثبت شد | خرید: %d پله، فروش: %d پله", actualBuyLevels, actualSellLevels);
+   else
+      Print("✅ شبکه اولیه ثبت شد.");
   }
 
 //+------------------------------------------------------------------+
@@ -1686,48 +1739,11 @@ void CloseAll()
    while(attempt < maxAttempts)
      {
       bool anyClosed = false;
+      double currentPrice = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) + SymbolInfoDouble(_Symbol, SYMBOL_BID)) / 2.0;
 
-      // بستن پوزیشن‌ها
-      for(int i = PositionsTotal() - 1; i >= 0; i--)
-        {
-         ulong t = PositionGetTicket(i);
-         if(PositionSelectByTicket(t) &&
-            PositionGetInteger(POSITION_MAGIC) == g_ActiveMagic &&
-            PositionGetString(POSITION_SYMBOL) == _Symbol)
-           {
-            if(GridTrade.PositionClose(t))
-              {
-               PrintFormat("✅ پوزیشن %I64u بسته شد.", t);
-               anyClosed = true;
-              }
-            else
-              {
-               PrintFormat("❌ بستن پوزیشن %I64u ناموفق. کد خطا: %d", t, GridTrade.ResultRetcode());
-              }
-           }
-        }
+      ClosePositionsNearestFirst(currentPrice, anyClosed);
+      DeleteOrdersNearestFirst(currentPrice, anyClosed);
 
-      // حذف سفارشات معلق
-      for(int i = OrdersTotal() - 1; i >= 0; i--)
-        {
-         ulong t = OrderGetTicket(i);
-         if(OrderSelect(t) &&
-            OrderGetInteger(ORDER_MAGIC) == g_ActiveMagic &&
-            OrderGetString(ORDER_SYMBOL) == _Symbol)
-           {
-            if(GridTrade.OrderDelete(t))
-              {
-               PrintFormat("✅ سفارش %I64u حذف شد.", t);
-               anyClosed = true;
-              }
-            else
-              {
-               PrintFormat("❌ حذف سفارش %I64u ناموفق. کد خطا: %d", t, GridTrade.ResultRetcode());
-              }
-           }
-        }
-
-      // اگر دیگر هیچ پوزیشن/سفارشی باقی نمانده، کار تمام است
       if(!AnyGridExists())
          break;
 
@@ -1743,6 +1759,108 @@ void CloseAll()
       Print("🚨 بعد از چندین تلاش هنوز پوزیشن/سفارشی با این magic باقی مانده!");
    else
       Print("تمامی پوزیشن‌ها و سفارشات با موفقیت بسته شدند.");
+  }
+
+//+------------------------------------------------------------------+
+//| بستن پوزیشن‌ها به ترتیب نزدیک‌ترین به قیمت فعلی              |
+//+------------------------------------------------------------------+
+void ClosePositionsNearestFirst(double currentPrice, bool &anyClosed)
+  {
+   int count = 0;
+   double distances[];
+   ulong tickets[];
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(PositionSelectByTicket(t) &&
+         PositionGetInteger(POSITION_MAGIC) == g_ActiveMagic &&
+         PositionGetString(POSITION_SYMBOL) == _Symbol)
+        {
+         double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+         ArrayResize(distances, count + 1);
+         ArrayResize(tickets, count + 1);
+         distances[count] = MathAbs(openPrice - currentPrice);
+         tickets[count] = t;
+         count++;
+        }
+     }
+
+   for(int i = 0; i < count - 1; i++)
+     for(int j = i + 1; j < count; j++)
+       if(distances[j] < distances[i])
+         {
+          double tmpD = distances[i];
+          distances[i] = distances[j];
+          distances[j] = tmpD;
+          ulong tmpT = tickets[i];
+          tickets[i] = tickets[j];
+          tickets[j] = tmpT;
+         }
+
+   for(int i = 0; i < count; i++)
+     {
+      if(GridTrade.PositionClose(tickets[i]))
+        {
+         PrintFormat("✅ پوزیشن %I64u بسته شد.", tickets[i]);
+         anyClosed = true;
+        }
+      else
+        {
+         PrintFormat("❌ بستن پوزیشن %I64u ناموفق. کد خطا: %d", tickets[i], GridTrade.ResultRetcode());
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| حذف سفارشات معلق به ترتیب نزدیک‌ترین به قیمت فعلی             |
+//+------------------------------------------------------------------+
+void DeleteOrdersNearestFirst(double currentPrice, bool &anyClosed)
+  {
+   int count = 0;
+   double distances[];
+   ulong tickets[];
+
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(OrderSelect(t) &&
+         OrderGetInteger(ORDER_MAGIC) == g_ActiveMagic &&
+         OrderGetString(ORDER_SYMBOL) == _Symbol)
+        {
+         double price = OrderGetDouble(ORDER_PRICE_OPEN);
+         ArrayResize(distances, count + 1);
+         ArrayResize(tickets, count + 1);
+         distances[count] = MathAbs(price - currentPrice);
+         tickets[count] = t;
+         count++;
+        }
+     }
+
+   for(int i = 0; i < count - 1; i++)
+     for(int j = i + 1; j < count; j++)
+       if(distances[j] < distances[i])
+         {
+          double tmpD = distances[i];
+          distances[i] = distances[j];
+          distances[j] = tmpD;
+          ulong tmpT = tickets[i];
+          tickets[i] = tickets[j];
+          tickets[j] = tmpT;
+         }
+
+   for(int i = 0; i < count; i++)
+     {
+      if(GridTrade.OrderDelete(tickets[i]))
+        {
+         PrintFormat("✅ سفارش %I64u حذف شد.", tickets[i]);
+         anyClosed = true;
+        }
+      else
+        {
+         PrintFormat("❌ حذف سفارش %I64u ناموفق. کد خطا: %d", tickets[i], GridTrade.ResultRetcode());
+        }
+     }
   }
 
 //+------------------------------------------------------------------+
