@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Hamed Movasaqpoor"
 #property link      "hamed.movasaqpoor@gmail.com"
-#property version   "6.8"
+#property version   "6.9"
 
 #include <Trade\Trade.mqh>
 
@@ -54,6 +54,9 @@ input double GridStep_Points   = 100.0;     // فاصله پله ها (Point)
 input double TotalProfitTarget = 40.0;     // هدف سود کل (دلار)
 input double TotalStopLoss     = -100.0;    // حد ضرر کل (عدد منفی، دلار)
 
+input bool   EnableStartTimer   = false;    // فعال‌سازی تایمر شروع شبکه
+input int    StartTimerHour     = 2;        // ساعت آغاز شبکه (ساعت محلی)
+input int    StartTimerMinute   = 30;       // دقیقه آغاز شبکه (ساعت محلی)
 
 input group "=== گسترش شبکه ==="
 input int    InitialMaxBuyExpansions  = 4;
@@ -81,6 +84,8 @@ bool   g_EnableCamarillaCheck = true; // وضعیت قابل تغییر در ز�
 bool   g_EnableCamarillaRangeCheck = true; // محدود کردن سفارشات درون بازه
 CamarillaRangeMode g_CamarillaRange = MODE_H2_L2; // متغیر قابل تغییر برای حالت بازه
 double g_TrailingActivation = 5.0; // مقدار فعال‌سازی تریلینگ قابل تغییر
+bool   g_EnableStartTimer = false; // وضعیت تایمر شروع شبکه
+datetime g_LastTimerTriggeredDate = 0; // آخرین تاریخ/زمان اجرای تایمر
 CTrade GridTrade;
 bool   g_WaitingForMarketOpen = false;
 string g_GridID            = "";
@@ -173,6 +178,8 @@ void SaveState()
    GlobalVariableSet(GVarName("EnableCamarillaRangeCheck"), g_EnableCamarillaRangeCheck ? 1.0 : 0.0);
    GlobalVariableSet(GVarName("g_CamarillaRange"), (double)g_CamarillaRange);
    GlobalVariableSet(GVarName("TrailingActivation"), g_TrailingActivation);
+   GlobalVariableSet(GVarName("EnableStartTimer"), g_EnableStartTimer ? 1.0 : 0.0);
+   GlobalVariableSet(GVarName("g_LastTimerTriggeredDate"), (double)g_LastTimerTriggeredDate);
    GlobalVariableSet(GVarName("g_SymmetricMode"), g_SymmetricMode ? 1.0 : 0.0);
    Print("📌 EA state saved to GlobalVariables.");
   }
@@ -210,6 +217,12 @@ bool LoadState()
    g_TrailingActivation = GlobalVariableCheck(GVarName("TrailingActivation"))
                           ? GlobalVariableGet(GVarName("TrailingActivation"))
                           : TrailingActivation;
+   g_EnableStartTimer = GlobalVariableCheck(GVarName("EnableStartTimer"))
+                          ? (GlobalVariableGet(GVarName("EnableStartTimer")) >= 0.5)
+                          : EnableStartTimer;
+   g_LastTimerTriggeredDate = GlobalVariableCheck(GVarName("g_LastTimerTriggeredDate"))
+                          ? (datetime)GlobalVariableGet(GVarName("g_LastTimerTriggeredDate"))
+                          : 0;
    g_SymmetricMode = GlobalVariableCheck(GVarName("g_SymmetricMode"))
                           ? (GlobalVariableGet(GVarName("g_SymmetricMode")) >= 0.5)
                           : false;
@@ -233,7 +246,7 @@ bool LoadState()
 void ClearState()
   {
    string prefix = "GridHedge~" + _Symbol + "~" + IntegerToString(MagicNumber) + "~";
-   string names[] = {"inited","g_GridInstance","g_ActiveMagic","isTradingActive","tradingDone","buyExpansionCount","sellExpansionCount","lastBuyPosCount","lastSellPosCount","lastBuyExpansionPrice","lastSellExpansionPrice","g_MaxBuyExpansions","g_MaxSellExpansions","g_ActualGridStep","g_CurrentLot","g_CurrentLotIndex","g_OrderCommentSeq","EnableCamarillaCheck","EnableCamarillaRangeCheck","g_CamarillaRange","g_SymmetricMode"};
+   string names[] = {"inited","g_GridInstance","g_ActiveMagic","isTradingActive","tradingDone","buyExpansionCount","sellExpansionCount","lastBuyPosCount","lastSellPosCount","lastBuyExpansionPrice","lastSellExpansionPrice","g_MaxBuyExpansions","g_MaxSellExpansions","g_ActualGridStep","g_CurrentLot","g_CurrentLotIndex","g_OrderCommentSeq","EnableCamarillaCheck","EnableCamarillaRangeCheck","g_CamarillaRange","TrailingActivation","EnableStartTimer","g_LastTimerTriggeredDate","g_SymmetricMode"};
    for(int i=0;i<ArraySize(names);i++) GlobalVariableDel(prefix + names[i]);
    Print("📌 Cleared persisted EA state.");
   }
@@ -409,6 +422,8 @@ int OnInit()
       g_EnableCamarillaRangeCheck = EnableCamarillaRangeCheck;
       g_CamarillaRange = CamarillaRange;
       g_TrailingActivation = TrailingActivation;
+      g_EnableStartTimer = EnableStartTimer;
+      g_LastTimerTriggeredDate = 0;
     }
 
     // ShowCamarillaLevelsOnChart();
@@ -423,6 +438,7 @@ int OnInit()
       CreateExpansionButtons();    // دکمه‌های ± خرید و فروش
       CreateLotButtons();
       CreateStartButton();         // «شروع شبکه»
+      UpdateStartTimerLabel();
 
       bool gridExists = AnyGridExists();
       if(gridExists && !tradingDone)
@@ -480,6 +496,8 @@ void OnDeinit(const int reason)
    ObjectDelete(0, "ValLot");
    ObjectDelete(0, "BtnLotMinus");
    ObjectDelete(0, "BtnLotPlus");
+   ObjectDelete(0, "BtnToggleStartTimer");
+   ObjectDelete(0, "ValStartTimer");
    ObjectDelete(0, "BtnToggleCamarilla");
    ObjectDelete(0, "LblCamarilla");
    ObjectDelete(0, "ValCamarilla");
@@ -560,6 +578,8 @@ void OnTick()
 
    if(!isTradingActive || tradingDone)
      {
+      if(CheckStartTimer())
+        return;
       UpdateChartComment();
       CheckTrendStrengthNotification();
       return;
@@ -617,10 +637,69 @@ void OnTick()
   UpdateChartComment(); 
   CheckTrendStrengthNotification();
 
-  if(UseBasketTrailing)
+if(CheckStartTimer())
+      return;
+
+   if(UseBasketTrailing)
     CheckBasketTrailingStop();
   else
     CheckTotalProfitLoss();
+  }
+
+//+------------------------------------------------------------------+
+//| بررسی تایمر شروع شبکه                                            |
+//+------------------------------------------------------------------+
+bool CheckStartTimer()
+  {
+  if(!g_EnableStartTimer) return false;
+  if(isTradingActive) return false;
+
+  MqlDateTime market;
+  TimeToStruct(TimeCurrent(), market);
+
+  if(market.hour < StartTimerHour) return false;
+  if(market.hour == StartTimerHour && market.min < StartTimerMinute) return false;
+
+  MqlDateTime target = market;
+  target.hour = StartTimerHour;
+  target.min  = StartTimerMinute;
+  target.sec  = 0;
+  datetime targetTime = StructToTime(target);
+
+  if(g_LastTimerTriggeredDate == targetTime)
+    return false;
+
+  PrintFormat("⏱️ تایمر شروع فعال شد؛ ساعت %02d:%02d رسید. شبکه در حال شروع...",
+          StartTimerHour, StartTimerMinute);
+  g_LastTimerTriggeredDate = targetTime;
+  SaveState();
+  StartGridByButton();
+  return true;
+  }
+
+//+------------------------------------------------------------------+
+//| تغییر وضعیت تایمر شروع                                            |
+//+------------------------------------------------------------------+
+void ToggleStartTimer()
+  {
+  g_EnableStartTimer = !g_EnableStartTimer;
+  UpdateStartTimerLabel();
+  SaveState();
+  PrintFormat("⏱️ تایمر شروع %s شد.", g_EnableStartTimer ? "فعال" : "غیرفعال");
+  }
+
+//+------------------------------------------------------------------+
+//| بروزرسانی برچسب وضعیت تایمر روی چارت                             |
+//+------------------------------------------------------------------+
+void UpdateStartTimerLabel()
+  {
+   if(ObjectFind(0, "ValStartTimer") < 0) return;
+   string status = g_EnableStartTimer ? "ON" : "OFF";
+   string timeText = StringFormat("%02d:%02d", StartTimerHour, StartTimerMinute);
+   ObjectSetString(0, "ValStartTimer", OBJPROP_TEXT,
+                   "تایمر: " + status + " " + timeText);
+   ObjectSetInteger(0, "ValStartTimer", OBJPROP_COLOR,
+                    g_EnableStartTimer ? clrLime : clrRed);
   }
 
 //+------------------------------------------------------------------+
@@ -633,6 +712,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
    if(sparam == "BtnStartGrid")        { StartGridByButton();   return; }
    if(sparam == "BtnCloseProfitable")  { CloseProfitableGrid(); return; }
    if(sparam == "BtnCloseAllGrid")     { CloseAllGrid();        return; }
+   if(sparam == "BtnToggleStartTimer") { ToggleStartTimer();    return; }
    if(sparam == "BtnFinishGrid")        { FinalizeGrid();          return; }
 
    if(sparam == "BtnBuyExpPlus")
@@ -1762,7 +1842,7 @@ void CloseAll()
   }
 
 //+------------------------------------------------------------------+
-//| بستن پوزیشن‌ها به ترتیب نزدیک‌ترین به قیمت فعلی              |
+//| بستن پوزیشن‌ها به ترتیب نزدیک‌ترین به قیمت فعلی (بدون تاخیر) |
 //+------------------------------------------------------------------+
 void ClosePositionsNearestFirst(double currentPrice, bool &anyClosed)
   {
@@ -1798,18 +1878,18 @@ void ClosePositionsNearestFirst(double currentPrice, bool &anyClosed)
           tickets[j] = tmpT;
          }
 
+   int closedCount = 0;
    for(int i = 0; i < count; i++)
      {
       if(GridTrade.PositionClose(tickets[i]))
         {
-         PrintFormat("✅ پوزیشن %I64u بسته شد.", tickets[i]);
          anyClosed = true;
-        }
-      else
-        {
-         PrintFormat("❌ بستن پوزیشن %I64u ناموفق. کد خطا: %d", tickets[i], GridTrade.ResultRetcode());
+         closedCount++;
         }
      }
+
+   if(closedCount > 0)
+     PrintFormat("✅ دستور بستن %d پوزیشن ارسال شد.", closedCount);
   }
 
 //+------------------------------------------------------------------+
@@ -1849,18 +1929,23 @@ void DeleteOrdersNearestFirst(double currentPrice, bool &anyClosed)
           tickets[j] = tmpT;
          }
 
+   int deletedCount = 0;
+   int failedCount = 0;
    for(int i = 0; i < count; i++)
      {
       if(GridTrade.OrderDelete(tickets[i]))
         {
-         PrintFormat("✅ سفارش %I64u حذف شد.", tickets[i]);
          anyClosed = true;
+         deletedCount++;
         }
       else
-        {
-         PrintFormat("❌ حذف سفارش %I64u ناموفق. کد خطا: %d", tickets[i], GridTrade.ResultRetcode());
-        }
+        failedCount++;
      }
+   
+   if(deletedCount > 0)
+     PrintFormat("✅ دستور حذف %d سفارش ارسال شد.", deletedCount);
+   if(failedCount > 0)
+     PrintFormat("⚠️  %d سفارش نتوانست حذف شود.", failedCount);
   }
 
 //+------------------------------------------------------------------+
@@ -2041,6 +2126,8 @@ void UpdateChartComment()
               "برای شروع، دکمه «شروع شبکه» را بزنید.\n\n";
       commentText += "🧭 روند کوتاه " + TrendTimeframeText(ShortTrendTF) + " : " + shortTrendStr + "\n";
       commentText += "🧭 روند میانی " + TrendTimeframeText(MidTrendTF) + " : " + midTrendStr + "\n";
+      string timerStatus = g_EnableStartTimer ? "فعال" : "غیرفعال";
+      commentText += "⏲️ تایمر شروع: " + timerStatus + " (" + StringFormat("%02d:%02d", StartTimerHour, StartTimerMinute) + ")\n";
       Comment(commentText);
       return;
      }
@@ -2051,6 +2138,8 @@ void UpdateChartComment()
               "برای شروع مجدد، دکمه «شروع شبکه» را بزنید.\n\n";
       commentText += "🧭 روند کوتاه " + TrendTimeframeText(ShortTrendTF) + " : " + shortTrendStr + "\n";
       commentText += "🧭 روند میانی " + TrendTimeframeText(MidTrendTF) + " : " + midTrendStr + "\n";
+      string timerStatus = g_EnableStartTimer ? "فعال" : "غیرفعال";
+      commentText += "⏲️ تایمر شروع: " + timerStatus + " (" + StringFormat("%02d:%02d", StartTimerHour, StartTimerMinute) + ")\n";
       Comment(commentText);
       return;
      }
@@ -2107,6 +2196,7 @@ void UpdateChartComment()
                   " | Sell " + IntegerToString(sellExpansionCount) + "/" + IntegerToString(g_MaxSellExpansions) + "\n";
    commentText += "📏 گام شبکه: " + DoubleToString(GridStep_Points, 0) + " point\n";
    commentText += "🎯 هدف سود : " + DoubleToString(TotalProfitTarget, 2) + " $   |   حد ضرر: " + DoubleToString(TotalStopLoss, 2) + " $\n";
+   commentText += "⏲️ تایمر شروع: " + (g_EnableStartTimer ? "فعال" : "غیرفعال") + " (" + StringFormat("%02d:%02d", StartTimerHour, StartTimerMinute) + ")\n";
    commentText += "⚙️ وضعیت   : " + (isTradingActive ? "فعال" : "غیرفعال") + " | " + (tradingDone ? "پایان یافته" : "در حال اجرا");
 
    Comment(commentText);
@@ -2161,9 +2251,8 @@ void CreateStartButton()
    if(ObjectFind(0, n) >= 0) ObjectDelete(0, n);
    ObjectCreate(0, n, OBJ_BUTTON, 0, 0, 0);
    ObjectSetInteger(0, n, OBJPROP_CORNER,       CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0, n, OBJPROP_XDISTANCE,    258);
-  ObjectSetInteger(0, n, OBJPROP_XDISTANCE,    358);
-  ObjectSetInteger(0, n, OBJPROP_YDISTANCE,    33);
+   ObjectSetInteger(0, n, OBJPROP_XDISTANCE,    358);
+   ObjectSetInteger(0, n, OBJPROP_YDISTANCE,    33);
    ObjectSetInteger(0, n, OBJPROP_XSIZE,        74);
    ObjectSetInteger(0, n, OBJPROP_YSIZE,        24);
    ObjectSetString (0, n, OBJPROP_TEXT,         "شروع شبکه");
@@ -2213,8 +2302,21 @@ void CreateCloseButtons()
       ObjectSetInteger(0, n2, OBJPROP_SELECTABLE,   false);
      }
 
-    string n3 = "BtnFinishGrid";
-    if(ObjectFind(0, n3) < 0)
+   CreateButton("BtnToggleStartTimer", "تایمر شروع", 130, 220, 120, 24, clrWhite, clrDodgerBlue, 8);
+   if(ObjectFind(0, "ValStartTimer") < 0)
+     {
+      ObjectCreate(0, "ValStartTimer", OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, "ValStartTimer", OBJPROP_CORNER,    CORNER_RIGHT_UPPER);
+      ObjectSetInteger(0, "ValStartTimer", OBJPROP_XDISTANCE, 280);
+      ObjectSetInteger(0, "ValStartTimer", OBJPROP_YDISTANCE, 220);
+      ObjectSetString (0, "ValStartTimer", OBJPROP_TEXT,      "");
+      ObjectSetInteger(0, "ValStartTimer", OBJPROP_COLOR,     clrYellow);
+      ObjectSetInteger(0, "ValStartTimer", OBJPROP_FONTSIZE,  8);
+      ObjectSetInteger(0, "ValStartTimer", OBJPROP_SELECTABLE, false);
+     }
+
+   string n3 = "BtnFinishGrid";
+   if(ObjectFind(0, n3) < 0)
      {
       ObjectCreate(0, n3, OBJ_BUTTON, 0, 0, 0);
       ObjectSetInteger(0, n3, OBJPROP_CORNER,       CORNER_RIGHT_UPPER);
@@ -2795,6 +2897,30 @@ void CreateLabel(string name, string text, int x, int y, color clr, int fontSize
    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, fontSize);
    ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
    ObjectSetInteger(0, name, OBJPROP_BACK, false);
-   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+  }
+
+//+------------------------------------------------------------------+
+//| تابع کمکی برای توضیح خطاهای OrderSend                            |
+//+------------------------------------------------------------------+
+string GetErrorDescription(uint retcode)
+  {
+   switch(retcode)
+     {
+      case TRADE_RETCODE_DONE:
+        return "عملیات موفق";
+      case TRADE_RETCODE_INVALID_VOLUME:
+        return "حجم نامعتبر";
+      case TRADE_RETCODE_INVALID_PRICE:
+        return "قیمت نامعتبر";
+      case TRADE_RETCODE_INVALID_STOPS:
+        return "حد ضرر/سود نامعتبر";
+      case TRADE_RETCODE_NO_MONEY:
+        return "اعتبار ناکافی";
+      case TRADE_RETCODE_PRICE_CHANGED:
+        return "قیمت تغییر کرده";
+      case TRADE_RETCODE_MARKET_CLOSED:
+        return "بازار بسته است";
+      default:
+        return StringFormat("خطای نامشخص (%d)", retcode);
+     }
   }
