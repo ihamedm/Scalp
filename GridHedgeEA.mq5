@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Hamed Movasaqpoor"
 #property link      "hamed.movasaqpoor@gmail.com"
-#property version   "6.9"
+#property version   "6.11"
 
 #include <Trade\Trade.mqh>
 
@@ -20,13 +20,6 @@ enum CamarillaRangeMode {
 input group "=== تنظیمات کلی ==="
 input int    MagicNumber       = 202701;   // شماره جادویی
 input int    TesterStartHour      = 1;        // ساعت شروع شبکه در تستر (0-23)
-
-
-input group "=== تنظیمات سرور (API) ==="
-input bool   EnableServerSync   = false;     // فعال‌سازی ارسال/بازیابی اطلاعات از سرور
-input string ServerURL          = "http://127.0.0.1:8000";  // آدرس سرور (مثال: http://your-server:8000)
-input string UserToken          = "";       // توکن JWT (از داشبورد سرور دریافت کنید)
-input int    LogSyncInterval    = 60;       // فاصله زمانی برای ارسال لاگ‌ها (ثانیه)
 
 
 input group "=== تشخیص روند ==="
@@ -137,10 +130,11 @@ double g_PeakProfit        = 0.0;    // اوج سود شناور (برای تر�
 double g_TrailingStopLevel = 0.0;    // سطح حد ضرر شناور (دلار)
 bool   g_TrailingActivated = false;  // آیا تریلینگ فعال شده است؟
 
+// --- مقادیر کرانگین سود شناور ---
+double g_MinFloatingPL = 0.0;  // کمترین سود شناور (بیشترین ضرر)
+double g_MaxFloatingPL = 0.0;  // بیشترین سود شناور (اوج سود)
+bool   g_FloatingExtremesInited = false; // آیا مقدار اولیه دریافت شده؟
 
-//------------- API / Server Sync Variables ---------
-datetime g_LastLogSyncTime = 0;  // آخرین زمان ارسال لاگ
-string   g_LastStatusMessage = ""; // آخرین پیام وضعیت برای جلوگیری از تکرار
 
 struct CamarillaLevels
   {
@@ -181,6 +175,9 @@ void SaveState()
    GlobalVariableSet(GVarName("EnableStartTimer"), g_EnableStartTimer ? 1.0 : 0.0);
    GlobalVariableSet(GVarName("g_LastTimerTriggeredDate"), (double)g_LastTimerTriggeredDate);
    GlobalVariableSet(GVarName("g_SymmetricMode"), g_SymmetricMode ? 1.0 : 0.0);
+   GlobalVariableSet(GVarName("g_MinFloatingPL"), g_MinFloatingPL);
+   GlobalVariableSet(GVarName("g_MaxFloatingPL"), g_MaxFloatingPL);
+   GlobalVariableSet(GVarName("g_FloatingExtremesInited"), g_FloatingExtremesInited ? 1.0 : 0.0);
    Print("📌 EA state saved to GlobalVariables.");
   }
 
@@ -227,6 +224,14 @@ bool LoadState()
                           ? (GlobalVariableGet(GVarName("g_SymmetricMode")) >= 0.5)
                           : false;
 
+  g_MinFloatingPL = GlobalVariableCheck(GVarName("g_MinFloatingPL"))
+                     ? GlobalVariableGet(GVarName("g_MinFloatingPL")) : 0.0;
+  g_MaxFloatingPL = GlobalVariableCheck(GVarName("g_MaxFloatingPL"))
+                     ? GlobalVariableGet(GVarName("g_MaxFloatingPL")) : 0.0;
+  g_FloatingExtremesInited = GlobalVariableCheck(GVarName("g_FloatingExtremesInited"))
+                              ? (GlobalVariableGet(GVarName("g_FloatingExtremesInited")) >= 0.5) : false;
+
+
   // بازسازی g_CurrentLot بر اساس شاخص ذخیره شده
    if(g_CurrentLotIndex >= 0 && g_CurrentLotIndex < ArraySize(g_LotSteps))
       g_CurrentLot = g_LotSteps[g_CurrentLotIndex];
@@ -246,7 +251,7 @@ bool LoadState()
 void ClearState()
   {
    string prefix = "GridHedge~" + _Symbol + "~" + IntegerToString(MagicNumber) + "~";
-   string names[] = {"inited","g_GridInstance","g_ActiveMagic","isTradingActive","tradingDone","buyExpansionCount","sellExpansionCount","lastBuyPosCount","lastSellPosCount","lastBuyExpansionPrice","lastSellExpansionPrice","g_MaxBuyExpansions","g_MaxSellExpansions","g_ActualGridStep","g_CurrentLot","g_CurrentLotIndex","g_OrderCommentSeq","EnableCamarillaCheck","EnableCamarillaRangeCheck","g_CamarillaRange","TrailingActivation","EnableStartTimer","g_LastTimerTriggeredDate","g_SymmetricMode"};
+   string names[] = {"inited","g_GridInstance","g_ActiveMagic","isTradingActive","tradingDone","buyExpansionCount","sellExpansionCount","lastBuyPosCount","lastSellPosCount","lastBuyExpansionPrice","lastSellExpansionPrice","g_MaxBuyExpansions","g_MaxSellExpansions","g_ActualGridStep","g_CurrentLot","g_CurrentLotIndex","g_OrderCommentSeq","EnableCamarillaCheck","EnableCamarillaRangeCheck","g_CamarillaRange","TrailingActivation","EnableStartTimer","g_LastTimerTriggeredDate","g_SymmetricMode", "g_MinFloatingPL","g_MaxFloatingPL","g_FloatingExtremesInited"};
    for(int i=0;i<ArraySize(names);i++) GlobalVariableDel(prefix + names[i]);
    Print("📌 Cleared persisted EA state.");
   }
@@ -319,6 +324,17 @@ double ProtectionPriceFromEntry(double entry, double points, bool isSL, bool isB
    if(points <= 0) return 0;
    return NormalizePriceToTick(PointToPrice(entry, points, isSL, isBuy));
   }
+
+
+void ResetFloatingExtremes()
+  {
+   // در لحظه شروع شبکه، با سود جاری مقداردهی اولیه می‌شوند
+   double initial = CalculateTotalProfit();
+   g_MinFloatingPL = initial;
+   g_MaxFloatingPL = initial;
+   g_FloatingExtremesInited = true;
+  }
+
 
 bool ModifyPositionProtection(ulong ticket, double sl, double tp)
   {
@@ -442,14 +458,14 @@ int OnInit()
 
       bool gridExists = AnyGridExists();
       if(gridExists && !tradingDone)
-        {
-         isTradingActive = true;
-         Print("🔁 شبکه فعال قبلی پیدا شد؛ موتور گسترش دوباره فعال شد.");
-        }
+      {
+        isTradingActive = true;
+        Print("🔁 شبکه فعال قبلی پیدا شد؛ موتور گسترش دوباره فعال شد.");
+      }
       else if(!gridExists)
-        {
-         isTradingActive = false;
-        }
+      {
+        isTradingActive = false;
+      }
 
       UpdateExpansionLabels();
       UpdateLotLabel();
@@ -585,23 +601,6 @@ void OnTick()
       return;
      }
 
-   // ارسال لاگ پوریدی وضعیت تریدینگ
-   if(TimeCurrent() - g_LastLogSyncTime >= LogSyncInterval)
-     {
-      int buyCount = CountPositionsByType(POSITION_TYPE_BUY);
-      int sellCount = CountPositionsByType(POSITION_TYPE_SELL);
-      double profit = CalculateTotalProfit();
-      
-      string statusMsg = StringFormat("Grid Active: %d Buy, %d Sell | Profit: %.2f USD | Lot: %.2f",
-                                      buyCount, sellCount, profit, g_CurrentLot);
-      if(statusMsg != g_LastStatusMessage)
-        {
-         SendLogToServer("INFO", statusMsg);
-         g_LastStatusMessage = statusMsg;
-        }
-      g_LastLogSyncTime = TimeCurrent();
-     }
-
    // گسترش شبکه بر اساس روش انتخاب‌شده
    if(ExpansionMethod == 0)
      {
@@ -615,7 +614,6 @@ void OnTick()
         {
          string msg = "فعال‌شدن سفارش خرید";
          TryBuyExpansion(msg);
-         SendLogToServer("INFO", msg);
          lastBuyPosCount = currentBuy;
         }
 
@@ -623,7 +621,6 @@ void OnTick()
         {
          string msg = "فعال‌شدن سفارش فروش";
          TrySellExpansion(msg);
-         SendLogToServer("INFO", msg);
          lastSellPosCount = currentSell;
         }
 
@@ -634,17 +631,42 @@ void OnTick()
      {
       ProcessPriceMovementExpansion();
      }
+  
+  
+  UpdateFloatingExtremes();
   UpdateChartComment(); 
   CheckTrendStrengthNotification();
 
-if(CheckStartTimer())
+
+
+  if(CheckStartTimer())
       return;
 
+   CheckTotalProfitLoss();
+   
    if(UseBasketTrailing)
-    CheckBasketTrailingStop();
-  else
-    CheckTotalProfitLoss();
+      CheckBasketTrailingStop();
+
+}
+
+
+void UpdateFloatingExtremes()
+  {
+   if(!isTradingActive || tradingDone) return; // فقط وقتی شبکه فعال است
+   double currentProfit = CalculateTotalProfit();
+   if(!g_FloatingExtremesInited)
+     {
+      g_MinFloatingPL = currentProfit;
+      g_MaxFloatingPL = currentProfit;
+      g_FloatingExtremesInited = true;
+     }
+   else
+     {
+      if(currentProfit < g_MinFloatingPL) g_MinFloatingPL = currentProfit;
+      if(currentProfit > g_MaxFloatingPL) g_MaxFloatingPL = currentProfit;
+     }
   }
+
 
 //+------------------------------------------------------------------+
 //| بررسی تایمر شروع شبکه                                            |
@@ -780,8 +802,6 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
          g_CurrentLot = g_LotSteps[g_CurrentLotIndex];
          UpdateLotLabel();
          SaveState();
-         UpdateParamOnServer("LotSize", g_CurrentLot);
-         SendLogToServer("INFO", "Lot Size increased to: " + DoubleToString(g_CurrentLot, 3));
          Print("حجم جدید: ", DoubleToString(g_CurrentLot, 3));
         }
       else Print("حداکثر حجم مجاز رسیده است.");
@@ -832,6 +852,8 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
      {
       g_TrailingActivation += 1.0;
       ObjectSetString(0, "ValTrailingActivation", OBJPROP_TEXT, DoubleToString(g_TrailingActivation, 2));
+    // بروزرسانی نمایش قیمت مربوط به مقدار جدید تریلینگ
+    UpdateTrailingDisplay();
       SaveState();
       PrintFormat("TrailingActivation → %.2f USD", g_TrailingActivation);
       return;
@@ -840,6 +862,8 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
      {
       g_TrailingActivation = MathMax(g_TrailingActivation - 1.0, 0.1);
       ObjectSetString(0, "ValTrailingActivation", OBJPROP_TEXT, DoubleToString(g_TrailingActivation, 2));
+    // بروزرسانی نمایش قیمت مربوط به مقدار جدید تریلینگ
+    UpdateTrailingDisplay();
       SaveState();
       PrintFormat("TrailingActivation → %.2f USD", g_TrailingActivation);
       return;
@@ -852,8 +876,6 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
          g_CurrentLot = g_LotSteps[g_CurrentLotIndex];
          UpdateLotLabel();
          SaveState();
-         UpdateParamOnServer("LotSize", g_CurrentLot);
-         SendLogToServer("INFO", "Lot Size decreased to: " + DoubleToString(g_CurrentLot, 3));
          Print("حجم جدید: ", DoubleToString(g_CurrentLot, 3));
         }
       else Print("حداقل حجم مجاز رسیده است.");
@@ -869,7 +891,6 @@ void StartGridByButton()
    if(AnyGridExists())
      {
       Print("⚠️ شبکه در حال حاضر فعال است. ابتدا آن را ببندید.");
-      SendLogToServer("WARNING", "Grid start attempted but already active");
       return;
      }
    Print("▶ ایجاد شبکه جدید...");
@@ -880,20 +901,17 @@ void StartGridByButton()
       string gridInfo = StringFormat("Grid started (Symmetric) | Symbol: %s | LotSize: %.3f | GridStep: %.2f | Buy Levels: %d | Sell Levels: %d",
                                      _Symbol, g_CurrentLot, GridStep_Points, GridLevelsBuy, GridLevelsSell);
       Print(gridInfo);
-      SendLogToServer("INFO", gridInfo);
      }
    else
      {
       string gridInfo = StringFormat("Grid started (Single) | Symbol: %s | LotSize: %.3f | GridStep: %.2f | Levels: %d",
                                      _Symbol, g_CurrentLot, GridStep_Points, GridLevels);
       Print(gridInfo);
-      SendLogToServer("INFO", gridInfo);
      }
    
-   UpdateParamOnServer("GridActive", 1.0);
-   UpdateParamOnServer("LotSize", g_CurrentLot);
-   
    isTradingActive = true;
+   ResetFloatingExtremes();
+
    tradingDone     = false;
 
    ResetTrailingState();
@@ -932,6 +950,7 @@ void ExecuteStrategy()
   {
    PrepareGridCommentContext();
    ResetTrailingState();
+   ResetFloatingExtremes();
 
    // بررسی حالت متقارن (خرید و فروش همزمان)
    g_SymmetricMode = (GridLevelsBuy > 0 && GridLevelsSell > 0);
@@ -987,7 +1006,8 @@ void ExecuteStrategy()
         }
      }
 
-   PlaceGrid();
+    ResetFloatingExtremes();
+    PlaceGrid();
 
    lastBuyExpansionPrice  = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    lastSellExpansionPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -1692,25 +1712,67 @@ int CountPositionsByType(long type)
   }
 
 //+------------------------------------------------------------------+
-//| بررسی سود/زیان کل                                               |
+//|  (پوزیشن های باز و بسته شده) محاسبه سود/زیان کل                  |
+//+------------------------------------------------------------------+
+
+double GetTotalGridProfit()
+  {
+   double openProfit = CalculateTotalProfit();
+   double closedProfit = CalculateClosedGridProfit();
+   return openProfit + closedProfit;
+  }  
+//+------------------------------------------------------------------+
+//| بررسی سود/زیان کل (پوزیشن های باز و بسته شده)                    |
 //+------------------------------------------------------------------+
 void CheckTotalProfitLoss()
   {
-   double totalProfit = 0; int posCount = 0;
+   // --- دریافت سود باز، بسته و تعداد پوزیشن‌های باز ---
+   double openProfit = 0.0;
+   int posCount = 0;
    for(int i = PositionsTotal()-1; i >= 0; i--)
      {
       ulong t = PositionGetTicket(i);
       if(PositionSelectByTicket(t) &&
          PositionGetInteger(POSITION_MAGIC) == g_ActiveMagic &&
          PositionGetString(POSITION_SYMBOL) == _Symbol)
-        { totalProfit += PositionGetDouble(POSITION_PROFIT); posCount++; }
+        {
+         openProfit += PositionGetDouble(POSITION_PROFIT);
+         posCount++;
+        }
      }
-   if(posCount == 0) return;
+   double closedProfit = CalculateClosedGridProfit();
+   double totalProfit = openProfit + closedProfit;
 
+   // اگر هیچ پوزیشن بازی وجود ندارد و کل سود به هدف/ضرر رسیده، شبکه را تمام کن
+   if(posCount == 0)
+     {
+      if(totalProfit >= TotalProfitTarget || totalProfit <= TotalStopLoss)
+        {
+         int oldMagic = g_ActiveMagic;
+         PrintFormat("🎯 هدف سود/ضرر کلی با سود بسته‌شده برآورده شد: %.2f$ (بدون پوزیشن باز)", totalProfit);
+         g_GridInstance++;
+         g_ActiveMagic = MagicNumber + g_GridInstance;
+         buyExpansionCount  = 0;
+         sellExpansionCount = 0;
+         lastBuyPosCount    = 0;
+         lastSellPosCount   = 0;
+         g_OrderCommentSeq  = 0;
+         g_GridID           = "";
+         tradingDone = true;
+         isTradingActive = false;
+         ClearState();
+         SaveState();
+         PrintFormat("شبکه با Magic=%d بسته شد. Magic جدید=%d آماده‌ی شروع.", oldMagic, g_ActiveMagic);
+        }
+      return;
+     }
+
+   // --- بررسی هدف سود کل (باز + بسته) ---
    if(totalProfit >= TotalProfitTarget)
      {
       int oldMagic = g_ActiveMagic;
-      PrintFormat("✅ هدف سود کل برآورده شد: %.2f$", totalProfit);
+      PrintFormat("✅ هدف سود کلی (باز+بسته) برآورده شد: %.2f$ | باز: %.2f$ | بسته: %.2f$",
+                  totalProfit, openProfit, closedProfit);
       CloseAll();
       g_GridInstance++;
       g_ActiveMagic = MagicNumber + g_GridInstance;
@@ -1726,10 +1788,12 @@ void CheckTotalProfitLoss()
       SaveState();
       PrintFormat("شبکه با Magic=%d بسته شد. Magic جدید=%d آماده‌ی شروع.", oldMagic, g_ActiveMagic);
      }
+   // --- بررسی حد ضرر کل (باز + بسته) ---
    else if(totalProfit <= TotalStopLoss)
      {
       int oldMagic = g_ActiveMagic;
-      PrintFormat("🛑 حد ضرر کل فعال شد: %.2f$", totalProfit);
+      PrintFormat("🛑 حد ضرر کلی (باز+بسته) فعال شد: %.2f$ | باز: %.2f$ | بسته: %.2f$",
+                  totalProfit, openProfit, closedProfit);
       CloseAll();
       g_GridInstance++;
       g_ActiveMagic = MagicNumber + g_GridInstance;
@@ -1746,11 +1810,10 @@ void CheckTotalProfitLoss()
       PrintFormat("شبکه با Magic=%d بسته شد. Magic جدید=%d آماده‌ی شروع.", oldMagic, g_ActiveMagic);
      }
 
-     ResetTrailingState();
+   ResetTrailingState();
   }
 
-
-  void CheckBasketTrailingStop()
+void CheckBasketTrailingStop()
   {
    if(!UseBasketTrailing) return;
    if(!isTradingActive || tradingDone) return;
@@ -1784,7 +1847,7 @@ void CheckTotalProfitLoss()
         }
      }
 
-   // بررسی برخورد سود به سطح توقف
+   // بررسی برخورد سود به سطح توقف تریلینگ
    if(profit <= g_TrailingStopLevel)
      {
       PrintFormat("🛑 تریلینگ فعال شد! سود شناور %.2f به سطح توقف %.2f رسید. بستن همه...",
@@ -1806,147 +1869,196 @@ void CheckTotalProfitLoss()
       ClearState();
       SaveState();
       PrintFormat("شبکه با Magic=%d بسته شد (تریلینگ). Magic جدید=%d آماده‌ی شروع.", oldMagic, g_ActiveMagic);
+      return;
+     }
+
+   // وقتی تریلینگ فعال است حد ضرر کل هم چک شود
+   if(profit <= TotalStopLoss)
+     {
+      PrintFormat("🛑 حد ضرر کل فعال شد: %.2f$ (در حالی که تریلینگ فعال بود). بستن همه...", profit);
+      CloseAll();
+      int oldMagic = g_ActiveMagic;
+      g_GridInstance++;
+      g_ActiveMagic = MagicNumber + g_GridInstance;
+      buyExpansionCount  = 0;
+      sellExpansionCount = 0;
+      lastBuyPosCount    = 0;
+      lastSellPosCount   = 0;
+      g_OrderCommentSeq  = 0;
+      g_GridID           = "";
+      tradingDone = true;
+      isTradingActive = false;
+      ResetTrailingState();
+      ClearState();
+      SaveState();
+      PrintFormat("شبکه با Magic=%d بسته شد. Magic جدید=%d آماده‌ی شروع.", oldMagic, g_ActiveMagic);
      }
   }
 //+------------------------------------------------------------------+
 //| بستن همه                                                        |
 //+------------------------------------------------------------------+
 void CloseAll()
-  {
-   int maxAttempts = 10;
-   int attempt = 0;
+{
+   double currentPrice = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) + 
+                          SymbolInfoDouble(_Symbol, SYMBOL_BID)) / 2.0;
 
-   while(attempt < maxAttempts)
-     {
-      bool anyClosed = false;
-      double currentPrice = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) + SymbolInfoDouble(_Symbol, SYMBOL_BID)) / 2.0;
+   // اول سفارشات معلق رو async حذف کن (سریع)
+   bool anyDeleted = false;
+   DeleteOrdersNearestFirst(currentPrice, anyDeleted);
 
-      ClosePositionsNearestFirst(currentPrice, anyClosed);
-      DeleteOrdersNearestFirst(currentPrice, anyClosed);
-
-      if(!AnyGridExists())
-         break;
-
-      if(!anyClosed)
-        {
-         Print("⚠️ تلاش مجدد برای بستن...");
-         Sleep(100);
-        }
-      attempt++;
-     }
+   // بعد پوزیشن‌ها رو async ببند تا ارسال سریع‌تری داشته باشیم
+   bool anyClosed = false;
+   ClosePositionsNearestFirst(currentPrice, anyClosed);
 
    if(AnyGridExists())
-      Print("🚨 بعد از چندین تلاش هنوز پوزیشن/سفارشی با این magic باقی مانده!");
+      Print("⚠️ برخی پوزیشن‌ها بسته نشدند - در تیک بعدی دوباره تلاش می‌شود.");
    else
-      Print("تمامی پوزیشن‌ها و سفارشات با موفقیت بسته شدند.");
-  }
+      Print("✅ تمامی پوزیشن‌ها و سفارشات بسته شدند.");
+}
 
 //+------------------------------------------------------------------+
 //| بستن پوزیشن‌ها به ترتیب نزدیک‌ترین به قیمت فعلی (بدون تاخیر) |
 //+------------------------------------------------------------------+
 void ClosePositionsNearestFirst(double currentPrice, bool &anyClosed)
-  {
+{
    int count = 0;
    double distances[];
    ulong tickets[];
+   double volumes[];
+   long   types[];
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
+   {
       ulong t = PositionGetTicket(i);
       if(PositionSelectByTicket(t) &&
          PositionGetInteger(POSITION_MAGIC) == g_ActiveMagic &&
          PositionGetString(POSITION_SYMBOL) == _Symbol)
-        {
+      {
          double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
          ArrayResize(distances, count + 1);
          ArrayResize(tickets, count + 1);
+         ArrayResize(volumes, count + 1);
+         ArrayResize(types, count + 1);
+
          distances[count] = MathAbs(openPrice - currentPrice);
-         tickets[count] = t;
+         tickets[count]   = t;
+         volumes[count]   = PositionGetDouble(POSITION_VOLUME);
+         types[count]     = PositionGetInteger(POSITION_TYPE);
          count++;
-        }
-     }
+      }
+   }
 
    for(int i = 0; i < count - 1; i++)
-     for(int j = i + 1; j < count; j++)
-       if(distances[j] < distances[i])
+      for(int j = i + 1; j < count; j++)
+         if(distances[j] < distances[i])
          {
-          double tmpD = distances[i];
-          distances[i] = distances[j];
-          distances[j] = tmpD;
-          ulong tmpT = tickets[i];
-          tickets[i] = tickets[j];
-          tickets[j] = tmpT;
+            double tmpD = distances[i]; distances[i] = distances[j]; distances[j] = tmpD;
+            ulong  tmpT = tickets[i];  tickets[i]  = tickets[j];  tickets[j]  = tmpT;
+            double tmpV = volumes[i];  volumes[i]  = volumes[j];  volumes[j]  = tmpV;
+            long   tmpTy = types[i];   types[i]    = types[j];   types[j]    = tmpTy;
          }
 
-   int closedCount = 0;
+   if(count == 0) return;
+
+   ulong  resultOrders[];
+   ArrayResize(resultOrders, count);
+
+   MqlTradeRequest req;
+   MqlTradeResult  res;
+   int sentCount = 0;
+
    for(int i = 0; i < count; i++)
-     {
-      if(GridTrade.PositionClose(tickets[i]))
-        {
+   {
+      ZeroMemory(req);
+      ZeroMemory(res);
+
+      double closePrice = (types[i] == POSITION_TYPE_BUY)
+                          ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                          : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+      req.action       = TRADE_ACTION_DEAL;
+      req.position     = tickets[i];
+      req.symbol       = _Symbol;
+      req.volume       = volumes[i];
+      req.price        = closePrice;
+      req.type         = (types[i] == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+      req.magic        = g_ActiveMagic;
+      req.deviation    = 50;
+      req.type_filling = ORDER_FILLING_IOC;
+      req.type_time    = ORDER_TIME_GTC;
+
+      if(OrderSendAsync(req, res))
+      {
+         resultOrders[sentCount++] = res.request_id;
          anyClosed = true;
-         closedCount++;
-        }
-     }
+      }
+   }
 
-   if(closedCount > 0)
-     PrintFormat("✅ دستور بستن %d پوزیشن ارسال شد.", closedCount);
-  }
-
+   if(sentCount > 0)
+      PrintFormat("✅ %d دستور بستن پوزیشن به‌صورت async ارسال شد.", sentCount);
+}
 //+------------------------------------------------------------------+
 //| حذف سفارشات معلق به ترتیب نزدیک‌ترین به قیمت فعلی             |
 //+------------------------------------------------------------------+
 void DeleteOrdersNearestFirst(double currentPrice, bool &anyClosed)
-  {
+{
    int count = 0;
    double distances[];
    ulong tickets[];
 
    for(int i = OrdersTotal() - 1; i >= 0; i--)
-     {
+   {
       ulong t = OrderGetTicket(i);
       if(OrderSelect(t) &&
          OrderGetInteger(ORDER_MAGIC) == g_ActiveMagic &&
          OrderGetString(ORDER_SYMBOL) == _Symbol)
-        {
+      {
          double price = OrderGetDouble(ORDER_PRICE_OPEN);
          ArrayResize(distances, count + 1);
          ArrayResize(tickets, count + 1);
          distances[count] = MathAbs(price - currentPrice);
          tickets[count] = t;
          count++;
-        }
-     }
+      }
+   }
 
+   // مرتب‌سازی (همان bubble sort قبلی)
    for(int i = 0; i < count - 1; i++)
-     for(int j = i + 1; j < count; j++)
-       if(distances[j] < distances[i])
+      for(int j = i + 1; j < count; j++)
+         if(distances[j] < distances[i])
          {
-          double tmpD = distances[i];
-          distances[i] = distances[j];
-          distances[j] = tmpD;
-          ulong tmpT = tickets[i];
-          tickets[i] = tickets[j];
-          tickets[j] = tmpT;
+            double tmpD = distances[i]; distances[i] = distances[j]; distances[j] = tmpD;
+            ulong  tmpT = tickets[i];  tickets[i]  = tickets[j];  tickets[j]  = tmpT;
          }
 
-   int deletedCount = 0;
-   int failedCount = 0;
+   if(count == 0) return;
+
+   // --- ارسال همه درخواست‌ها بدون انتظار ---
+   ulong  resultOrders[];
+   ArrayResize(resultOrders, count);
+
+   MqlTradeRequest req;
+   MqlTradeResult  res;
+
+   int sentCount = 0;
    for(int i = 0; i < count; i++)
-     {
-      if(GridTrade.OrderDelete(tickets[i]))
-        {
+   {
+      ZeroMemory(req);
+      ZeroMemory(res);
+
+      req.action = TRADE_ACTION_REMOVE;
+      req.order  = tickets[i];
+
+      // ASYNCH_MODE: فقط دستور ارسال میشه، منتظر اجرا نمیمونه
+      if(OrderSendAsync(req, res))
+      {
+         resultOrders[sentCount++] = res.request_id;
          anyClosed = true;
-         deletedCount++;
-        }
-      else
-        failedCount++;
-     }
-   
-   if(deletedCount > 0)
-     PrintFormat("✅ دستور حذف %d سفارش ارسال شد.", deletedCount);
-   if(failedCount > 0)
-     PrintFormat("⚠️  %d سفارش نتوانست حذف شود.", failedCount);
-  }
+      }
+   }
+
+   PrintFormat("✅ %d دستور حذف به‌صورت async ارسال شد.", sentCount);
+}
 
 //+------------------------------------------------------------------+
 void CloseProfitableGrid()
@@ -1962,7 +2074,6 @@ void CloseProfitableGrid()
          if(GridTrade.PositionClose(t)) closed++;
      }
    PrintFormat("%d پوزیشن سودده بسته شد.", closed);
-   SendLogToServer("INFO", StringFormat("Closed %d profitable positions", closed));
   }
 
 //+------------------------------------------------------------------+
@@ -1983,8 +2094,6 @@ void CloseAllGrid()
    ClearState();
    SaveState();
    ResetTrailingState();
-   SendLogToServer("INFO", "Closed all grid positions");
-   UpdateParamOnServer("GridActive", 0.0);
    PrintFormat("شبکه با Magic=%d بسته شد. Magic جدید=%d آماده‌ی شروع.", oldMagic, g_ActiveMagic);
   }
 
@@ -1994,7 +2103,6 @@ void FinalizeGrid()
    if(!AnyGridExists())
      {
       Print("هیچ شبکه‌ی فعالی برای پایان وجود ندارد.");
-      SendLogToServer("WARNING", "Finalize attempted but no active grid exists");
       return;
      }
 
@@ -2015,8 +2123,6 @@ void FinalizeGrid()
    ResetTrailingState();
 
    Comment("");
-   SendLogToServer("INFO", StringFormat("Grid finalized manually | oldMagic=%d newMagic=%d", oldMagic, g_ActiveMagic));
-   UpdateParamOnServer("GridActive", 0.0);
    PrintFormat("شبکه با Magic=%d پایان یافت. Magic جدید=%d آماده‌ی شروع.", oldMagic, g_ActiveMagic);
   }
 
@@ -2195,6 +2301,13 @@ void UpdateChartComment()
    commentText += "🔄 گسترش   : Buy " + IntegerToString(buyExpansionCount) + "/" + IntegerToString(g_MaxBuyExpansions) +
                   " | Sell " + IntegerToString(sellExpansionCount) + "/" + IntegerToString(g_MaxSellExpansions) + "\n";
    commentText += "📏 گام شبکه: " + DoubleToString(GridStep_Points, 0) + " point\n";
+  // نمایش کمترین و بیشترین سود شناور ثبت‌شده
+   if(g_FloatingExtremesInited)
+     {
+      commentText += "📊  اوج سود/ضرر شناور: " + 
+                     DoubleToString(g_MinFloatingPL, 2) + " $  (کف)   |   " +
+                     DoubleToString(g_MaxFloatingPL, 2) + " $  (اوج)\n";
+     }
    commentText += "🎯 هدف سود : " + DoubleToString(TotalProfitTarget, 2) + " $   |   حد ضرر: " + DoubleToString(TotalStopLoss, 2) + " $\n";
    commentText += "⏲️ تایمر شروع: " + (g_EnableStartTimer ? "فعال" : "غیرفعال") + " (" + StringFormat("%02d:%02d", StartTimerHour, StartTimerMinute) + ")\n";
    commentText += "⚙️ وضعیت   : " + (isTradingActive ? "فعال" : "غیرفعال") + " | " + (tradingDone ? "پایان یافته" : "در حال اجرا");
@@ -2241,6 +2354,72 @@ void UpdateExpansionLabels()
                    IntegerToString(buyExpansionCount) + "/" + IntegerToString(g_MaxBuyExpansions));
    ObjectSetString(0, "ValSellExp", OBJPROP_TEXT,
                    IntegerToString(sellExpansionCount) + "/" + IntegerToString(g_MaxSellExpansions));
+  }
+//+------------------------------------------------------------------+
+//| برآورد قیمت هدف برای فعال‌سازی تریلینگ (تقریبی)                 |
+//+------------------------------------------------------------------+
+double EstimateTrailingActivationPrice(double targetProfit)
+  {
+   double currentProfit = CalculateTotalProfit();
+   double need = targetProfit - currentProfit;
+   double midPrice = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) + SymbolInfoDouble(_Symbol, SYMBOL_BID)) / 2.0;
+
+   if(MathAbs(need) < 0.0000001) return(midPrice);
+
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickSize <= 0 || tickValue == 0) return(0);
+
+   double sensitivity = 0.0; // profit change per 1.0 price unit
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(PositionSelectByTicket(t) &&
+         PositionGetInteger(POSITION_MAGIC) == g_ActiveMagic &&
+         PositionGetString(POSITION_SYMBOL) == _Symbol)
+        {
+         double vol = PositionGetDouble(POSITION_VOLUME); // lots
+         int    ptype = PositionGetInteger(POSITION_TYPE);
+         double dir = (ptype == POSITION_TYPE_BUY) ? 1.0 : -1.0;
+         // tickValue per tickSize for 1 lot -> per 1 price unit multiply by volume
+         sensitivity += dir * vol * (tickValue / tickSize);
+        }
+     }
+
+   if(sensitivity == 0.0) return(0);
+
+   double priceChange = need / sensitivity;
+   return midPrice + priceChange;
+  }
+
+//+------------------------------------------------------------------+
+//| بروزرسانی نمایش تریلینگ: مقدار و خط قیمت روی چارت               |
+//+------------------------------------------------------------------+
+void UpdateTrailingDisplay()
+  {
+   // label showing numeric activation (left as-is)
+   ObjectSetString(0, "ValTrailingActivation", OBJPROP_TEXT, DoubleToString(g_TrailingActivation, 2));
+
+   // compute estimated price
+   double price = EstimateTrailingActivationPrice(g_TrailingActivation);
+   if(price <= 0)
+     {
+      ObjectSetString(0, "LblTrailingActivation", OBJPROP_TEXT, "Trailing: -");
+      if(ObjectFind(0, "HLineTrailingActivation") >= 0) ObjectDelete(0, "HLineTrailingActivation");
+      return;
+     }
+
+   string txt = StringFormat("TrailingPrice: %.5f", price);
+   ObjectSetString(0, "LblTrailingActivation", OBJPROP_TEXT, txt);
+
+   // draw or update horizontal line
+   if(ObjectFind(0, "HLineTrailingActivation") < 0)
+     {
+      ObjectCreate(0, "HLineTrailingActivation", OBJ_HLINE, 0, 0, 0);
+      ObjectSetInteger(0, "HLineTrailingActivation", OBJPROP_COLOR, clrDarkOrange);
+      ObjectSetInteger(0, "HLineTrailingActivation", OBJPROP_STYLE, STYLE_DOT);
+     }
+   ObjectSetDouble(0, "HLineTrailingActivation", OBJPROP_PRICE, price);
   }
 //+------------------------------------------------------------------+
 //| دکمه شروع (فشرده‌تر)                                            |
@@ -2302,13 +2481,13 @@ void CreateCloseButtons()
       ObjectSetInteger(0, n2, OBJPROP_SELECTABLE,   false);
      }
 
-   CreateButton("BtnToggleStartTimer", "تایمر شروع", 130, 220, 120, 24, clrWhite, clrDodgerBlue, 8);
+   CreateButton("BtnToggleStartTimer", "تایمر شروع", 130, 250, 120, 24, clrWhite, clrDodgerBlue, 8);
    if(ObjectFind(0, "ValStartTimer") < 0)
      {
       ObjectCreate(0, "ValStartTimer", OBJ_LABEL, 0, 0, 0);
       ObjectSetInteger(0, "ValStartTimer", OBJPROP_CORNER,    CORNER_RIGHT_UPPER);
       ObjectSetInteger(0, "ValStartTimer", OBJPROP_XDISTANCE, 280);
-      ObjectSetInteger(0, "ValStartTimer", OBJPROP_YDISTANCE, 220);
+      ObjectSetInteger(0, "ValStartTimer", OBJPROP_YDISTANCE, 250);
       ObjectSetString (0, "ValStartTimer", OBJPROP_TEXT,      "");
       ObjectSetInteger(0, "ValStartTimer", OBJPROP_COLOR,     clrYellow);
       ObjectSetInteger(0, "ValStartTimer", OBJPROP_FONTSIZE,  8);
@@ -2468,11 +2647,13 @@ void CreateLotButtons()
       // برچسب TrailingActivation
       ObjectCreate(0, "LblTrailingActivation", OBJ_LABEL, 0, 0, 0);
       ObjectSetInteger(0, "LblTrailingActivation", OBJPROP_CORNER,    CORNER_RIGHT_UPPER);
-      ObjectSetInteger(0, "LblTrailingActivation", OBJPROP_XDISTANCE, 300);
+      ObjectSetInteger(0, "LblTrailingActivation", OBJPROP_XDISTANCE, 500);
       ObjectSetInteger(0, "LblTrailingActivation", OBJPROP_YDISTANCE, 223);
       ObjectSetString (0, "LblTrailingActivation", OBJPROP_TEXT,      "Trailing:");
       ObjectSetInteger(0, "LblTrailingActivation", OBJPROP_COLOR,     clrDarkOrange);
       ObjectSetInteger(0, "LblTrailingActivation", OBJPROP_FONTSIZE,  8);
+      // نمایش مقدار قیمت مربوط به فعال‌سازی تریلینگ روی چارت
+      UpdateTrailingDisplay();
      }
   }
 //+------------------------------------------------------------------+
@@ -2728,158 +2909,6 @@ void ShowCamarillaLevelsOnChart()
      }
 
    Print("📊 سطوح کاماریلا (عمودی، چندلیبل) در سمت راست چارت به‌روز شد.");
-  }
-
-//+------------------------------------------------------------------+
-//| SERVER API FUNCTIONS - ارسال/بازیابی اطلاعات از سرور             |
-//+------------------------------------------------------------------+
-
-string TrimString(string value)
-  {
-   StringTrimLeft(value);
-   StringTrimRight(value);
-   return value;
-  }
-
-string JsonEscape(string value)
-  {
-   StringReplace(value, "\\", "\\\\");
-   StringReplace(value, "\"", "\\\"");
-   StringReplace(value, "\r", "\\r");
-   StringReplace(value, "\n", "\\n");
-   return value;
-  }
-
-void StringToUtf8Body(string text, char &body[])
-  {
-   int len = StringToCharArray(text, body, 0, WHOLE_ARRAY, CP_UTF8);
-   if(len > 0)
-      ArrayResize(body, len - 1);
-  }
-
-string ResponseToString(const char &result[])
-  {
-   if(ArraySize(result) <= 0)
-      return "";
-   return CharArrayToString(result, 0, ArraySize(result), CP_UTF8);
-  }
-
-void PrintWebRequestError(string action, int status, int err, string url, string response, string headers)
-  {
-   PrintFormat("❌ %s: status=%d err=%d url=%s response=%s headers=%s",
-               action, status, err, url, response, headers);
-  }
-
-//+------------------------------------------------------------------+
-//| ارسال لاگ به سرور                                                |
-//+------------------------------------------------------------------+
-void SendLogToServer(string level, string message)
-  {
-   if(!EnableServerSync || UserToken == "") return;
-
-   string url = ServerURL + "/logs";
-   string headers = "Authorization: Bearer " + UserToken + "\r\nContent-Type: application/json\r\n";
-   
-   // ساخت JSON payload
-   string json = "{\"level\":\"" + JsonEscape(level) + "\",\"message\":\"" + JsonEscape(message) + "\"}";
-   
-   char post_data[];
-   StringToUtf8Body(json, post_data);
-   
-   char result[];
-   string result_headers;
-   
-   ResetLastError();
-   int res = WebRequest("POST", url, headers, 5000, post_data, result, result_headers);
-   int err = GetLastError();
-   string response = ResponseToString(result);
-   if(res >= 200 && res < 300)
-     {
-      PrintFormat("✅ لاگ ارسال شد: %s", message);
-     }
-   else
-     {
-      PrintWebRequestError("خطا در ارسال لاگ", res, err, url, response, result_headers);
-     }
-  }
-
-//+------------------------------------------------------------------+
-//| بازیابی پارامتر از سرور                                           |
-//+------------------------------------------------------------------+
-double FetchParamFromServer(string paramName, double defaultValue)
-  {
-   if(!EnableServerSync || UserToken == "") return defaultValue;
-   
-   string url = ServerURL + "/params";
-   string headers = "Authorization: Bearer " + UserToken + "\r\n";
-   
-   char empty_data[];
-   char result[];
-   string result_headers;
-   
-   ResetLastError();
-   int res = WebRequest("GET", url, headers, 5000, empty_data, result, result_headers);
-   int err = GetLastError();
-   string response = ResponseToString(result);
-   if(res < 200 || res >= 300)
-     {
-      PrintWebRequestError("خطا در دریافت پارامترها", res, err, url, response, result_headers);
-      return defaultValue;
-     }
-   
-   // جستجوی ساده برای parameter (می‌تواند بهتر شود با JSON parser)
-   int pos = StringFind(response, "\"" + paramName + "\"");
-   if(pos == -1) return defaultValue;
-   
-   pos = StringFind(response, "\"value\"", pos);
-   if(pos == -1) return defaultValue;
-   
-   pos = StringFind(response, ":", pos);
-   if(pos == -1) return defaultValue;
-   
-   string value_str = StringSubstr(response, pos + 1, 30);
-   value_str = TrimString(value_str);
-   if(StringLen(value_str) > 0 && StringGetCharacter(value_str, 0) == '"')
-      value_str = StringSubstr(value_str, 1);
-   int endQuote = StringFind(value_str, "\"");
-   if(endQuote >= 0)
-      value_str = StringSubstr(value_str, 0, endQuote);
-   value_str = TrimString(value_str);
-   
-   return StringToDouble(value_str);
-  }
-
-//+------------------------------------------------------------------+
-//| تغییر پارامتر روی سرور                                            |
-//+------------------------------------------------------------------+
-void UpdateParamOnServer(string paramName, double value)
-  {
-   if(!EnableServerSync || UserToken == "") return;
-   
-   string url = ServerURL + "/params/" + paramName;
-   string headers = "Authorization: Bearer " + UserToken + "\r\nContent-Type: application/json\r\n";
-   
-   // ساخت JSON payload
-   string json = "{\"name\":\"" + JsonEscape(paramName) + "\",\"value\":\"" + DoubleToString(value, 3) + "\"}";
-   
-   char put_data[];
-   StringToUtf8Body(json, put_data);
-   
-   char result[];
-   string result_headers;
-   
-   ResetLastError();
-   int res = WebRequest("PUT", url, headers, 5000, put_data, result, result_headers);
-   int err = GetLastError();
-   string response = ResponseToString(result);
-   if(res >= 200 && res < 300)
-     {
-      PrintFormat("✅ پارامتر %s به‌روز شد: %.3f", paramName, value);
-     }
-   else
-     {
-      PrintWebRequestError("خطا در بروزرسانی پارامتر", res, err, url, response, result_headers);
-     }
   }
 
 //+------------------------------------------------------------------+
