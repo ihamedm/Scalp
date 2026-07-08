@@ -31,7 +31,7 @@ input ENUM_MA_METHOD   TrendMAMethod       = MODE_EMA;
 input int              TrendConfirmCandles = 3;
 input ENUM_TIMEFRAMES  ShortTrendTF        = PERIOD_M1;   // تایم‌فریم روند کوتاه‌مدت
 input ENUM_TIMEFRAMES  MidTrendTF          = PERIOD_M15;  // تایم‌فریم روند میان‌مدت
-input bool             EnableTrendNotification = true;     // ارسال نوتیف وقتی هر دو روند قوی و هم‌جهت باشند
+input bool             EnableTrendNotification = false;     // ارسال نوتیف وقتی هر دو روند قوی و هم‌جهت باشند
 input int              TrendNotifyMinStrength  = 70;       // حداقل قدرت برای ارسال نوتیف
 input int              TrendNotifyCooldownSec  = 300;      // فاصله حداقل بین نوتیف‌ها (ثانیه)
 
@@ -122,8 +122,6 @@ double RSI_SellMin         = 35.0;      // حداقل RSI برای فروش (ب�
 
 // حجم لات قابل تعدیل
 double g_CurrentLot = 0.01;      // حجم فعلی لات (جایگزین FixedLot)
-double g_LotSteps[] = {0.01, 0.02, 0.03, 0.04, 0.05}; // مراحل تغییر حجم
-int    g_CurrentLotIndex = 0;    // فهرس مرحله فعلی
 
 
 double g_PeakProfit        = 0.0;    // اوج سود شناور (برای تریلینگ)
@@ -166,7 +164,6 @@ void SaveState()
    GlobalVariableSet(GVarName("g_MaxSellExpansions"), (double)g_MaxSellExpansions);
    GlobalVariableSet(GVarName("g_ActualGridStep"), g_ActualGridStep);
    GlobalVariableSet(GVarName("g_CurrentLot"), g_CurrentLot);
-   GlobalVariableSet(GVarName("g_CurrentLotIndex"), (double)g_CurrentLotIndex);
    GlobalVariableSet(GVarName("g_OrderCommentSeq"), (double)g_OrderCommentSeq);
    GlobalVariableSet(GVarName("EnableCamarillaCheck"), g_EnableCamarillaCheck ? 1.0 : 0.0);
    GlobalVariableSet(GVarName("EnableCamarillaRangeCheck"), g_EnableCamarillaRangeCheck ? 1.0 : 0.0);
@@ -199,7 +196,6 @@ bool LoadState()
    g_MaxSellExpansions  = (int)GlobalVariableGet(GVarName("g_MaxSellExpansions"));
    g_ActualGridStep     = GlobalVariableGet(GVarName("g_ActualGridStep"));
    g_CurrentLot         = GlobalVariableGet(GVarName("g_CurrentLot"));
-   g_CurrentLotIndex    = (int)GlobalVariableGet(GVarName("g_CurrentLotIndex"));
    g_OrderCommentSeq    = GlobalVariableCheck(GVarName("g_OrderCommentSeq"))
                           ? (int)GlobalVariableGet(GVarName("g_OrderCommentSeq")) : 0;
    g_EnableCamarillaCheck = GlobalVariableCheck(GVarName("EnableCamarillaCheck"))
@@ -232,15 +228,7 @@ bool LoadState()
                               ? (GlobalVariableGet(GVarName("g_FloatingExtremesInited")) >= 0.5) : false;
 
 
-  // بازسازی g_CurrentLot بر اساس شاخص ذخیره شده
-   if(g_CurrentLotIndex >= 0 && g_CurrentLotIndex < ArraySize(g_LotSteps))
-      g_CurrentLot = g_LotSteps[g_CurrentLotIndex];
-   else
-     {
-      g_CurrentLotIndex = 0;
-      g_CurrentLot = g_LotSteps[0];
-      Print("⚠️ شاخص لات نامعتبر، ریست شد.");
-     }
+   g_CurrentLot = NormalizeLotVolume(g_CurrentLot);
 
    g_GridID = "شبکه " + IntegerToString(g_GridInstance + 1);
 
@@ -251,7 +239,7 @@ bool LoadState()
 void ClearState()
   {
    string prefix = "GridHedge~" + _Symbol + "~" + IntegerToString(MagicNumber) + "~";
-   string names[] = {"inited","g_GridInstance","g_ActiveMagic","isTradingActive","tradingDone","buyExpansionCount","sellExpansionCount","lastBuyPosCount","lastSellPosCount","lastBuyExpansionPrice","lastSellExpansionPrice","g_MaxBuyExpansions","g_MaxSellExpansions","g_ActualGridStep","g_CurrentLot","g_CurrentLotIndex","g_OrderCommentSeq","EnableCamarillaCheck","EnableCamarillaRangeCheck","g_CamarillaRange","TrailingActivation","EnableStartTimer","g_LastTimerTriggeredDate","g_SymmetricMode", "g_MinFloatingPL","g_MaxFloatingPL","g_FloatingExtremesInited"};
+   string names[] = {"inited","g_GridInstance","g_ActiveMagic","isTradingActive","tradingDone","buyExpansionCount","sellExpansionCount","lastBuyPosCount","lastSellPosCount","lastBuyExpansionPrice","lastSellExpansionPrice","g_MaxBuyExpansions","g_MaxSellExpansions","g_ActualGridStep","g_CurrentLot","g_OrderCommentSeq","EnableCamarillaCheck","EnableCamarillaRangeCheck","g_CamarillaRange","TrailingActivation","EnableStartTimer","g_LastTimerTriggeredDate","g_SymmetricMode", "g_MinFloatingPL","g_MaxFloatingPL","g_FloatingExtremesInited"};
    for(int i=0;i<ArraySize(names);i++) GlobalVariableDel(prefix + names[i]);
    Print("📌 Cleared persisted EA state.");
   }
@@ -296,6 +284,52 @@ void PrintSymbolInfo()
 double CalcLot(double slPoints)
   {
    return g_CurrentLot;
+  }
+
+double GetLotStep()
+  {
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   return (step > 0.0) ? step : 0.01;
+  }
+
+double NormalizeLotVolume(double lot)
+  {
+   double step   = GetLotStep();
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(minLot <= 0.0) minLot = step;
+   if(maxLot <= 0.0) maxLot = 100000.0;
+   lot = MathFloor(lot / step + 0.0000001) * step;
+   lot = MathMax(minLot, MathMin(maxLot, lot));
+   return NormalizeDouble(lot, 8);
+  }
+
+bool IncreaseCurrentLot()
+  {
+   double step   = GetLotStep();
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(maxLot <= 0.0) maxLot = 100000.0;
+   if(g_CurrentLot >= maxLot - step * 0.0001)
+     {
+      Print("حداکثر حجم مجاز بروکر رسیده است.");
+      return false;
+     }
+   g_CurrentLot = NormalizeLotVolume(g_CurrentLot + step);
+   return true;
+  }
+
+bool DecreaseCurrentLot()
+  {
+   double step   = GetLotStep();
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   if(minLot <= 0.0) minLot = step;
+   if(g_CurrentLot <= minLot + step * 0.0001)
+     {
+      Print("حداقل حجم مجاز رسیده است.");
+      return false;
+     }
+   g_CurrentLot = NormalizeLotVolume(g_CurrentLot - step);
+   return true;
   }
 
 //+------------------------------------------------------------------+
@@ -424,16 +458,7 @@ int OnInit()
       g_ActiveMagic       = MagicNumber + g_GridInstance;
 
       // هماهنگ‌سازی حجم اولیه با FixedLot ورودی
-      g_CurrentLot = FixedLot;
-      g_CurrentLotIndex = 0;
-      for(int i = 0; i < ArraySize(g_LotSteps); i++)
-        {
-         if(MathAbs(g_LotSteps[i] - FixedLot) < 0.0001)
-           {
-            g_CurrentLotIndex = i;
-            break;
-           }
-        } 
+      g_CurrentLot = NormalizeLotVolume(FixedLot);
       g_EnableCamarillaCheck = EnableCamarillaCheck;
       g_EnableCamarillaRangeCheck = EnableCamarillaRangeCheck;
       g_CamarillaRange = CamarillaRange;
@@ -796,15 +821,12 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 
   else if(sparam == "BtnLotPlus")
      {
-      if(g_CurrentLotIndex + 1 < ArraySize(g_LotSteps))
+      if(IncreaseCurrentLot())
         {
-         g_CurrentLotIndex++;
-         g_CurrentLot = g_LotSteps[g_CurrentLotIndex];
          UpdateLotLabel();
          SaveState();
          Print("حجم جدید: ", DoubleToString(g_CurrentLot, 3));
         }
-      else Print("حداکثر حجم مجاز رسیده است.");
       return;
      }
    else if(sparam == "BtnToggleCamarilla")
@@ -870,15 +892,12 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
      }
    else if(sparam == "BtnLotMinus")
      {
-      if(g_CurrentLotIndex - 1 >= 0)
+      if(DecreaseCurrentLot())
         {
-         g_CurrentLotIndex--;
-         g_CurrentLot = g_LotSteps[g_CurrentLotIndex];
          UpdateLotLabel();
          SaveState();
          Print("حجم جدید: ", DoubleToString(g_CurrentLot, 3));
         }
-      else Print("حداقل حجم مجاز رسیده است.");
       return;
      }
   }
@@ -1315,7 +1334,7 @@ bool PlaceInitialLimit(ENUM_ORDER_TYPE type, double lot, double sl, double tp, s
    req.tp           = tp;
    req.magic        = g_ActiveMagic;
    req.comment      = orderComment;
-   req.type_filling = ORDER_FILLING_RETURN;
+   req.type_filling = ORDER_FILLING_FOK;
    req.type_time    = ORDER_TIME_GTC;
 
    if(!OrderSend(req, res))
@@ -1441,7 +1460,7 @@ bool PlacePendingOrder(ENUM_ORDER_TYPE type, double lot, double entry,
    req.tp           = tp;
    req.magic        = g_ActiveMagic;
    req.comment      = orderComment;
-   req.type_filling = ORDER_FILLING_RETURN;
+   req.type_filling = ORDER_FILLING_FOK;
    req.type_time    = ORDER_TIME_GTC;
 
    if(!OrderSend(req, res))
@@ -1773,6 +1792,7 @@ void CheckTotalProfitLoss()
       int oldMagic = g_ActiveMagic;
       PrintFormat("✅ هدف سود کلی (باز+بسته) برآورده شد: %.2f$ | باز: %.2f$ | بسته: %.2f$",
                   totalProfit, openProfit, closedProfit);
+      WriteGridReport();
       CloseAll();
       g_GridInstance++;
       g_ActiveMagic = MagicNumber + g_GridInstance;
@@ -1794,6 +1814,7 @@ void CheckTotalProfitLoss()
       int oldMagic = g_ActiveMagic;
       PrintFormat("🛑 حد ضرر کلی (باز+بسته) فعال شد: %.2f$ | باز: %.2f$ | بسته: %.2f$",
                   totalProfit, openProfit, closedProfit);
+      WriteGridReport();
       CloseAll();
       g_GridInstance++;
       g_ActiveMagic = MagicNumber + g_GridInstance;
@@ -1852,6 +1873,7 @@ void CheckBasketTrailingStop()
      {
       PrintFormat("🛑 تریلینگ فعال شد! سود شناور %.2f به سطح توقف %.2f رسید. بستن همه...",
                   profit, g_TrailingStopLevel);
+      WriteGridReport(); 
       CloseAll();
       // ریست شبکه (مانند وقتی TP/SL اصلی زده می‌شود)
       int oldMagic = g_ActiveMagic;
@@ -1876,6 +1898,7 @@ void CheckBasketTrailingStop()
    if(profit <= TotalStopLoss)
      {
       PrintFormat("🛑 حد ضرر کل فعال شد: %.2f$ (در حالی که تریلینگ فعال بود). بستن همه...", profit);
+      WriteGridReport(); 
       CloseAll();
       int oldMagic = g_ActiveMagic;
       g_GridInstance++;
@@ -1984,7 +2007,7 @@ void ClosePositionsNearestFirst(double currentPrice, bool &anyClosed)
       req.type         = (types[i] == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
       req.magic        = g_ActiveMagic;
       req.deviation    = 50;
-      req.type_filling = ORDER_FILLING_IOC;
+      req.type_filling = ORDER_FILLING_FOK;
       req.type_time    = ORDER_TIME_GTC;
 
       if(OrderSendAsync(req, res))
@@ -2080,6 +2103,7 @@ void CloseProfitableGrid()
 void CloseAllGrid()
   {
    int oldMagic = g_ActiveMagic;
+   WriteGridReport();
    CloseAll();
    g_GridInstance++;
    g_ActiveMagic = MagicNumber + g_GridInstance;
@@ -2105,6 +2129,8 @@ void FinalizeGrid()
       Print("هیچ شبکه‌ی فعالی برای پایان وجود ندارد.");
       return;
      }
+
+  WriteGridReport();
 
    int oldMagic = g_ActiveMagic;
    g_GridInstance++;
@@ -2298,6 +2324,8 @@ void UpdateChartComment()
    commentText += "⏳ سفارشات : Buy Stop:" + IntegerToString(buyOrders) + " | Sell Stop:" + IntegerToString(sellOrders) + "\n";
    commentText += "💰 سود/زیان باز: " + DoubleToString(totalProfit, 2) + " $\n";
    commentText += "✅ سود/زیان بسته‌شده: " + DoubleToString(closedProfit, 2) + " $\n";
+   double totalGridProfit = totalProfit + closedProfit;
+   commentText += "💵 سود/زیان کل (باز+بسته): " + DoubleToString(totalGridProfit, 2) + " $\n";
    commentText += "🔄 گسترش   : Buy " + IntegerToString(buyExpansionCount) + "/" + IntegerToString(g_MaxBuyExpansions) +
                   " | Sell " + IntegerToString(sellExpansionCount) + "/" + IntegerToString(g_MaxSellExpansions) + "\n";
    commentText += "📏 گام شبکه: " + DoubleToString(GridStep_Points, 0) + " point\n";
@@ -2315,6 +2343,82 @@ void UpdateChartComment()
    Comment(commentText);
   }
 
+  void WriteGridReport()
+  {
+   // جمع‌آوری اطلاعات لحظه‌ای از وضعیت شبکه
+   int liveDir = RefreshLiveTrendDirection(false);
+   int midDir  = RefreshMidTrendDirection(false);
+
+   int buyPos = CountPositionsByType(POSITION_TYPE_BUY);
+   int sellPos = CountPositionsByType(POSITION_TYPE_SELL);
+   int totalPos = buyPos + sellPos;
+
+   int buyOrders = 0, sellOrders = 0;
+   for(int i = OrdersTotal()-1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(OrderSelect(t) &&
+         OrderGetInteger(ORDER_MAGIC) == g_ActiveMagic &&
+         OrderGetString(ORDER_SYMBOL) == _Symbol)
+        {
+         ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+         if(type == ORDER_TYPE_BUY_STOP || type == ORDER_TYPE_BUY_LIMIT) buyOrders++;
+         else if(type == ORDER_TYPE_SELL_STOP || type == ORDER_TYPE_SELL_LIMIT) sellOrders++;
+        }
+     }
+
+   double openProfit   = CalculateTotalProfit();
+   double closedProfit = CalculateClosedGridProfit();
+   double totalProfit  = openProfit + closedProfit;
+
+   // ساخت متن گزارش
+   string report = "═══════ GridHedge Ultimate - گزارش پایان شبکه ═══════\n";
+   report += "📅 زمان: " + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + "\n";
+   report += "📊 نماد: " + _Symbol + "\n";
+   report += "🔢 Magic: " + IntegerToString(g_ActiveMagic) + "\n";
+   report += "🏷️ شناسه: " + (g_GridID != "" ? g_GridID : "N/A") + "\n";
+   report += "🧭 جهت شبکه: " + TrendDirectionText((g_GridDirection != -1) ? g_GridDirection : liveDir) + "\n";
+   report += "🧭 روند کوتاه " + TrendTimeframeText(ShortTrendTF) + ": " + FormatTrendStatus(liveDir, g_TrendStrength) + "\n";
+   report += "🧭 روند میانی " + TrendTimeframeText(MidTrendTF) + ": " + FormatTrendStatus(midDir, g_MidTrendStrength) + "\n";
+   report += "📦 حجم لات: " + DoubleToString(g_CurrentLot, 3) + "\n";
+   report += "📊 پوزیشن‌های باز: " + IntegerToString(totalPos) + " (خرید: " + IntegerToString(buyPos) + " | فروش: " + IntegerToString(sellPos) + ")\n";
+   report += "⏳ سفارشات معلق: Buy Stop: " + IntegerToString(buyOrders) + " | Sell Stop: " + IntegerToString(sellOrders) + "\n";
+   report += "💰 سود/زیان باز: " + DoubleToString(openProfit, 2) + " $\n";
+   report += "✅ سود/زیان بسته‌شده: " + DoubleToString(closedProfit, 2) + " $\n";
+   report += "💵 سود/زیان کل (باز+بسته): " + DoubleToString(totalProfit, 2) + " $\n";
+   report += "🔄 گسترش: Buy " + IntegerToString(buyExpansionCount) + "/" + IntegerToString(g_MaxBuyExpansions) +
+            " | Sell " + IntegerToString(sellExpansionCount) + "/" + IntegerToString(g_MaxSellExpansions) + "\n";
+   report += "📏 گام شبکه: " + DoubleToString(GridStep_Points, 0) + " point\n";
+   report += "🎯 هدف سود کلی: " + DoubleToString(TotalProfitTarget, 2) + " $ | حد ضرر کلی: " + DoubleToString(TotalStopLoss, 2) + " $\n";
+
+   if(g_FloatingExtremesInited)
+      report += "📊 کران سود: " + DoubleToString(g_MinFloatingPL, 2) + " $ (کف) | " +
+                DoubleToString(g_MaxFloatingPL, 2) + " $ (اوج)\n";
+
+   report += "⏲️ تایمر شروع: " + (g_EnableStartTimer ? "فعال" : "غیرفعال") + " (" +
+             StringFormat("%02d:%02d", StartTimerHour, StartTimerMinute) + ")\n";
+   report += "⚙️ وضعیت: پایان یافته\n";
+   report += "═════════════════════════════════════════════\n";
+
+      // ساخت نام فایل
+   string filename = "GridReport_" + _Symbol + "_" + IntegerToString(g_ActiveMagic) + "_" +
+                     TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES) + ".txt";
+   StringReplace(filename, ":", "-");
+
+   // نوشتن فایل با کدگذاری UTF-16 (برای پشتیبانی کامل از فارسی)
+   int handle = FileOpen(filename, FILE_WRITE|FILE_TXT|FILE_UNICODE);
+   if(handle != INVALID_HANDLE)
+     {
+      FileWriteString(handle, report);
+      FileClose(handle);
+      Print("📄 گزارش پایان شبکه ذخیره شد: ", filename);
+     }
+   else
+      Print("❌ خطا در ذخیره گزارش: ", GetLastError());
+
+  }
+
+  
   //+------------------------------------------------------------------+
 //| به‌روزرسانی برچسب‌های تغییرات حجم                        |
 //+------------------------------------------------------------------+

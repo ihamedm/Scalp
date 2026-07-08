@@ -4,9 +4,17 @@
 //+------------------------------------------------------------------+
 #property copyright "Hamed Movasaqpoor"
 #property link      "hamed.movasaqpoor@gmail.com"
-#property version   "1.05"
+#property version   "1.07"
 #property strict
 #include <Trade\Trade.mqh>
+
+enum ENUM_ENTRY_SIGNAL_MODE
+  {
+   ENTRY_SIGNAL_CROSS_ONLY = 0,        // فقط کراس MA
+   ENTRY_SIGNAL_MOMENTUM_ONLY = 1,     // فقط ایمپالس/بریک‌اوت
+   ENTRY_SIGNAL_CROSS_OR_MOMENTUM = 2  // کراس یا ایمپالس/بریک‌اوت
+  };
+
 input group "=== تنظیمات کلی ==="
 input int             MagicNumber          = 120032;   // شماره جادویی اکسپرت
 input string          ExpectedSymbol       = "XAUUSD"; // برای مجاز بودن همه نمادها خالی بگذارید
@@ -20,22 +28,32 @@ input int                SlowMAPeriod          = 32;
 input ENUM_MA_METHOD     MAMethod              = MODE_EMA;
 input ENUM_APPLIED_PRICE MAPrice               = PRICE_CLOSE;
 input double             NearCrossPoints       = 30.0; // وقتی فاصله MAها کمتر از این مقدار شود لاگ ثبت می‌شود
+input ENUM_ENTRY_SIGNAL_MODE EntrySignalMode   = ENTRY_SIGNAL_CROSS_OR_MOMENTUM;
 input bool               CloseOnOppositeSignal = false;
 input bool               ReEntryInTrend        = false; // ورود مجدد در ادامه روند بعد از بسته شدن پوزیشن
 input int                ReEntryMinBars        = 3;     // حداقل فاصله کندلی بین ورودها در حالت ورود مجدد
 
+input group "=== سیگنال ایمپالس/بریک‌اوت ==="
+input int    MomentumBreakoutLookback     = 6;    // شکست سقف/کف چند کندل قبل
+input double MomentumMinBodyATR           = 0.45; // حداقل بدنه کندل سیگنال نسبت به ATR
+input double MomentumMinRangeATR          = 0.70; // حداقل کل رنج کندل سیگنال نسبت به ATR
+input double MomentumMaxWickPercent       = 35.0; // حداکثر شادو مخالف جهت، درصدی از کل کندل
+input double MomentumBreakoutBufferPoints = 5.0;  // فاصله اضافه شکست سقف/کف بر حسب پوینت
+input double MomentumMaxPriceFastATR      = 1.20; // اگر قیمت خیلی از MA سریع دور شده باشد ورود نکند
+input double MomentumMinFastSlopePoints   = 2.0;  // حداقل شیب MA سریع روی کندل بسته‌شده
+
 input group "=== فیلتر حداقل فاصله MA ==="
-input bool   UseMinMADistanceFilter = true;  //UseMinMADistanceFilter فعال‌سازی فیلتر حداقل فاصله MAها
+input bool   UseMinMADistanceFilter = false;  //UseMinMADistanceFilter فعال‌سازی فیلتر حداقل فاصله MAها
 input double MinMADistanceATR      = 5.0;  //MinMADistanceATR حداقل فاصله MA بر حسب چند برابر ATR (مثلاً ۵ برابر)
 input double MinMADistancePoints    = 80.0;  //MinMADistancePoints حداقل فاصله بین MA سریع و کند (پوینت)
 
 input group "=== فیلتر ADX ==="
-input bool   UseADXFilter           = true;
+input bool   UseADXFilter           = false;
 input int    ADXPeriod              = 14;
 input double ADXThreshold           = 25.0;  //ADXThreshold حداقل ADX برای روند قوی
 
 input group "=== فیلتر قیمت روی MA ==="
-input bool   UsePriceAboveMAFilter  = true;  //UsePriceAboveMAFilter قیمت باید در سمت درست MAها باشد
+input bool   UsePriceAboveMAFilter  = false;  //UsePriceAboveMAFilter قیمت باید در سمت درست MAها باشد
 
 input group "=== فیلتر RSI ==="
 input bool   UseRSIFilter           = false; //UseRSIFilter فیلتر RSI (اختیاری، شاید خیلی محدودکننده شود)
@@ -44,7 +62,7 @@ input double RSIOverbought          = 70.0;  //RSIOverbought برای خرید �
 input double RSIOversold            = 30.0;  //RSIOversold برای فروش زیر این عدد ورود ممنوع
 
 input group "=== فیلتر تایم‌فریم بالاتر ==="
-input bool   UseMultiTimeframeFilter = true; //UseMultiTimeframeFilter تایید تایم‌فریم بالاتر
+input bool   UseMultiTimeframeFilter = false; //UseMultiTimeframeFilter تایید تایم‌فریم بالاتر
 input ENUM_TIMEFRAMES HigherTF      = PERIOD_M5;
 input int    HigherTF_FastMAPeriod  = 12;
 input int    HigherTF_SlowMAPeriod  = 32;
@@ -52,12 +70,12 @@ input ENUM_MA_METHOD HigherTF_MAMethod = MODE_EMA;
 input ENUM_APPLIED_PRICE HigherTF_MAPrice = PRICE_CLOSE;
 
 input group "=== فیلتر قدرت کندل ==="
-input bool   UseCandleStrengthFilter = true;
+input bool   UseCandleStrengthFilter = false;
 input double MinCandleBodyATR   = 0.5;  //MinCandleBodyATR حداقل نسبت بدنه کندل به ATR
 input double MinCandleTotalATR  = 0.8;  //MinCandleTotalATR حداقل نسبت کل اندازه کندل (High-Low) به ATR
 
 input group "=== فیلتر حمایت/مقاومت ==="
-input bool   UseSRProximityFilter      = true;   // UseSRProximityFilter فعال‌سازی فیلتر نزدیکی به حمایت/مقاومت
+input bool   UseSRProximityFilter      = false;   // UseSRProximityFilter فعال‌سازی فیلتر نزدیکی به حمایت/مقاومت
 input double MinDistanceFromSRPoints  = 80.0;   // حداقل فاصله از سطح S/R بر حسب پوینت
 input int    SRLookbackBars            = 40;     // SRLookbackBars تعداد کندل برای یافتن سطوح استاتیک
 input bool   UseMAAsDynamicSR          = true;   // UseMAAsDynamicSR استفاده از MAهای فعلی به عنوان سطوح داینامیک
@@ -72,32 +90,17 @@ input double StopLossPoints   = 0.0; // عدد صفر یعنی حد ضرر او�
 input bool   UseDisableInitialSL = false; // اگر فعال باشد هیچ SL اولیه‌ای ارسال نمی‌شود
 input double TakeProfitPoints = 0.0; // عدد صفر یعنی حد سود اولیه ثبت نشود
 
-input group "=== تریلینگ ATR ==="
-input bool   UseATRTrailing          = true;
-input int    ATRPeriod               = 14;
-input double RiskPercent             = 50.0;  //RiskPercent درصد ریسک: عدد بالاتر = فاصله تریلینگ بیشتر (محدوده 0-100)
-input double TrailStartATR           = 1.0;  //TrailStartATR شروع تریلینگ بعد از کسب این مقدار سود بر حسب ATR
-input bool   MoveTakeProfitWithTrend = true;
-input double TakeProfitTrailFactor   = 1.5;   //TakeProfitTrailFactor ضریب فاصله حد سود از قیمت (نسبت به trailDistance)
-input bool   UseDynamicTrail         = true;  //UseDynamicTrail فعال‌سازی فاصله تریلینگ پویا در روند قوی
-input double TrendStrengthMax        = 2.0;   //TrendStrengthMax حداکثر ضریب افزایش فاصله در قوی‌ترین روند
-input bool   CloseAtProfitATR        = true; //CloseAtProfitATR بستن کامل پوزیشن در سود (با احتیاط استفاده شود)
-input double CloseProfitATR          = 2.5;
+input group "=== تریلینگ ساده و تهاجمی ==="
+input bool   UseATRTrailing          = true;   // فعال‌سازی تریلینگ
+input int    ATRPeriod               = 14;     // دوره ATR
+input double TrailStartATR           = 0.4;    // شروع تریلینگ بعد از این مقدار سود (بر حسب ATR)
+input double SLTrailATRMult          = 0.7;    // فاصله حد ضرر از قیمت (چند برابر ATR)
+input double StaticTP_ATRFactor      = 1.8;    // ضریب ATR برای حد سود ثابت (۰ = بدون TP)
+input bool   UpdateSLOnBarCloseOnly  = true;   // آپدیت SL فقط در بسته شدن کندل
+input bool   UseBreakevenProtection  = true;   // انتقال SL به نقطه ورود بعد از سود مشخص
+input double BreakevenATR            = 0.8;    // سود لازم برای Breakeven (بر حسب ATR)
+input double BreakevenBufferPoints   = 10.0;   // بافر Breakeven (پوینت)
 
-input group "=== بهبود تریلینگ SL (جدید v1.05) ==="
-// --- راهکار ۱: ضریب مجزا برای SL ---
-input bool   UseSeparateSLBuffer     = true;  //UseSeparateSLBuffer فاصله SL جداگانه از TP
-input double SLBufferFactor          = 2.0;   //SLBufferFactor ضریب ATR برای فاصله SL از قیمت (مستقل از RiskPercent)
-// --- راهکار ۲: SL مبتنی بر Swing High/Low ---
-input bool   UseSwingBasedSL         = false; //UseSwingBasedSL SL روی آخرین کف/سقف معنادار (پیشنهادی برای روندهای بزرگتر)
-input int    SwingLookback           = 5;     //SwingLookback تعداد کندل برای یافتن Swing High/Low
-input double SwingBufferPoints       = 50.0;  //SwingBufferPoints فاصله اضافه از Swing بر حسب پوینت
-// --- راهکار ۳: آپدیت SL فقط روی کندل بسته‌شده ---
-input bool   UpdateSLOnBarCloseOnly  = true;  //UpdateSLOnBarCloseOnly SL فقط روی کندل بسته آپدیت شود (جلوگیری از زده شدن با شادو)
-// --- محافظت اضافه ---
-input bool   UseBreakevenProtection  = true;  //UseBreakevenProtection وقتی سود به حد مشخصی رسید SL به نقطه ورود منتقل شود
-input double BreakevenATR            = 1.0;   //BreakevenATR سود لازم (بر حسب ATR) برای فعال شدن Breakeven
-input double BreakevenBufferPoints   = 10.0;  //BreakevenBufferPoints پوینت اضافه بالای نقطه ورود برای SL Breakeven
 
 input group "=== لاگ تستر ==="
 input bool   TesterVerboseLogs       = true;  // فقط در Strategy Tester لاگ‌های دقیق چاپ می‌کند
@@ -108,7 +111,7 @@ input int ButtonY = 28; // فاصله پنل از بالای چارت
 CTrade trade;
 
 
-const string EA_VERSION = "1.05";
+const string EA_VERSION = "1.07";
 const int NO_SIGNAL = -1;
 const string BTN_START = "GTT_BtnStart";
 const string BTN_STOP  = "GTT_BtnStop";
@@ -146,21 +149,6 @@ int OnInit()
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(DeviationPoints);
    PrintFormat("GoldenTrendTrailEA نسخه %s بارگذاری شد.", EA_VERSION);
-   TesterLog(StringFormat("تنظیمات تستر | Lot=%.2f | SL=%.1f | TP=%.1f | Risk=%.1f | TrailStartATR=%.2f | CloseAtProfitATR=%s %.2f | ReEntry=%s | LogLevel=%d",
-                          LotSize,
-                          StopLossPoints,
-                          TakeProfitPoints,
-                          RiskPercent,
-                          TrailStartATR,
-                          CloseAtProfitATR ? "فعال" : "غیرفعال",
-                          CloseProfitATR,
-                          ReEntryInTrend ? "فعال" : "غیرفعال",
-                          TesterLogLevel));
-   TesterLog(StringFormat("تنظیمات SL بهبود یافته | SeparateSL=%s(%.1fx) | SwingSL=%s(%dbar,%.0fpt) | BarCloseOnly=%s | Breakeven=%s(%.1fATR+%.0fpt)",
-                          UseSeparateSLBuffer ? "فعال" : "غیرفعال", SLBufferFactor,
-                          UseSwingBasedSL ? "فعال" : "غیرفعال", SwingLookback, SwingBufferPoints,
-                          UpdateSLOnBarCloseOnly ? "فعال" : "غیرفعال",
-                          UseBreakevenProtection ? "فعال" : "غیرفعال", BreakevenATR, BreakevenBufferPoints));
 
    g_fastHandle = iMA(_Symbol, SignalTimeframe, FastMAPeriod, 0, MAMethod, MAPrice);
    g_slowHandle = iMA(_Symbol, SignalTimeframe, SlowMAPeriod, 0, MAMethod, MAPrice);
@@ -202,14 +190,11 @@ int OnInit()
       Print("خطا در ساخت هندل اندیکاتورهای مووینگ اوریج.");
       return INIT_FAILED;
      }
-   if(UseATRTrailing)
+   g_atrHandle = iATR(_Symbol, SignalTimeframe, ATRPeriod);
+   if(g_atrHandle == INVALID_HANDLE)
      {
-      g_atrHandle = iATR(_Symbol, SignalTimeframe, ATRPeriod);
-      if(g_atrHandle == INVALID_HANDLE)
-        {
-         Print("خطا در ساخت هندل اندیکاتور ATR.");
-         return INIT_FAILED;
-        }
+      Print("خطا در ساخت هندل اندیکاتور ATR.");
+      return INIT_FAILED;
      }
    if(IsTester())
      {
@@ -222,8 +207,8 @@ int OnInit()
       g_isActive = false;
       Print("GoldenTrendTrailEA منتظر کلیک روی دکمه شروع معامله است.");
      }
-   PrintFormat("سیگنال: MA(%d/%d) در %s | نماد=%s | حداکثر پوزیشن=%d",
-               FastMAPeriod, SlowMAPeriod, EnumToString(SignalTimeframe), _Symbol, MaxOpenPositions);
+   PrintFormat("سیگنال: %s | MA(%d/%d) در %s | نماد=%s | حداکثر پوزیشن=%d",
+               EntrySignalModeText(), FastMAPeriod, SlowMAPeriod, EnumToString(SignalTimeframe), _Symbol, MaxOpenPositions);
    return INIT_SUCCEEDED;
   }
 //+------------------------------------------------------------------+
@@ -325,7 +310,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
                         const MqlTradeResult &result)
   {
-   if(!IsTesterLogEnabled() && TesterLogLevel >= 1) return;
+   if(!IsTesterLogEnabled(1)) return;
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
    if(trans.deal == 0) return;
    if(!HistoryDealSelect(trans.deal)) return;
@@ -341,7 +326,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    long dealReason = HistoryDealGetInteger(trans.deal, DEAL_REASON);
    long dealType = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
 
-   TesterLog(StringFormat("خروج از معامله | deal=%I64u | نوع=%s | حجم=%.2f | قیمت خروج=%s | سود=%.2f | دلیل=%s",
+   TesterLog(1, StringFormat("خروج از معامله | deal=%I64u | نوع=%s | حجم=%.2f | قیمت خروج=%s | سود=%.2f | دلیل=%s",
                           trans.deal,
                           dealType == DEAL_TYPE_BUY ? "خرید" : "فروش",
                           dealVolume,
@@ -720,27 +705,124 @@ int GetEntrySignal()
    datetime barTime = iTime(_Symbol, SignalTimeframe, 1);
    if(barTime <= 0 || barTime == g_lastSignalBarTime)
       return NO_SIGNAL;
+
+   bool allowCross = (EntrySignalMode == ENTRY_SIGNAL_CROSS_ONLY ||
+                      EntrySignalMode == ENTRY_SIGNAL_CROSS_OR_MOMENTUM);
+   bool allowMomentum = (EntrySignalMode == ENTRY_SIGNAL_MOMENTUM_ONLY ||
+                         EntrySignalMode == ENTRY_SIGNAL_CROSS_OR_MOMENTUM);
+
    bool bullishCross = (fast[2] <= slow[2] && fast[1] > slow[1]);
    bool bearishCross = (fast[2] >= slow[2] && fast[1] < slow[1]);
-   if(IsTesterLogEnabled() && (bullishCross || bearishCross))
+   int crossDirection = NO_SIGNAL;
+   if(allowCross && bullishCross)
+      crossDirection = ORDER_TYPE_BUY;
+   if(allowCross && bearishCross)
+      crossDirection = ORDER_TYPE_SELL;
+
+   if(IsTesterLogEnabled() && crossDirection != NO_SIGNAL)
       TesterLog(StringFormat("جزئیات کراس | کندل=%s | fast[2]=%s slow[2]=%s | fast[1]=%s slow[1]=%s",
                              TimeToString(barTime, TIME_DATE|TIME_MINUTES|TIME_SECONDS),
                              PriceToText(fast[2]),
                              PriceToText(slow[2]),
                              PriceToText(fast[1]),
                              PriceToText(slow[1])));
-   if(bullishCross)
+
+   int momentumDirection = allowMomentum ? GetMomentumEntrySignal(fast) : NO_SIGNAL;
+   if(momentumDirection != NO_SIGNAL && crossDirection != NO_SIGNAL && momentumDirection != crossDirection)
      {
-      g_lastSignalBarTime = barTime;
+      TesterLog(1, "سیگنال رد شد: کراس و ایمپالس جهت مخالف دارند.");
+      return NO_SIGNAL;
+     }
+
+   int direction = (momentumDirection != NO_SIGNAL) ? momentumDirection : crossDirection;
+   if(direction == NO_SIGNAL)
+      return NO_SIGNAL;
+
+   g_lastSignalBarTime = barTime;
+   if(momentumDirection != NO_SIGNAL)
+     {
+      PrintFormat("ورود %s تایید شد: کندل ایمپالس/بریک‌اوت تازه شناسایی شد.",
+                  direction == ORDER_TYPE_BUY ? "خرید" : "فروش");
+      return direction;
+     }
+
+   if(direction == ORDER_TYPE_BUY)
+     {
       PrintFormat("ورود خرید تایید شد: MA(%d) از بالای MA(%d) عبور کرد.", FastMAPeriod, SlowMAPeriod);
       return ORDER_TYPE_BUY;
      }
-   if(bearishCross)
+
+   PrintFormat("ورود فروش تایید شد: MA(%d) از پایین MA(%d) عبور کرد.", FastMAPeriod, SlowMAPeriod);
+   return ORDER_TYPE_SELL;
+  }
+
+int GetMomentumEntrySignal(double &fast[])
+  {
+   double atr = GetATR();
+   if(atr <= 0) return NO_SIGNAL;
+
+   int lookback = MathMax(MomentumBreakoutLookback, 2);
+   int needed = lookback + 2;
+   double open[], high[], low[], close[];
+   ArraySetAsSeries(open, true);
+   ArraySetAsSeries(high, true);
+   ArraySetAsSeries(low, true);
+   ArraySetAsSeries(close, true);
+   if(CopyOpen(_Symbol, SignalTimeframe, 1, needed, open) < needed ||
+      CopyHigh(_Symbol, SignalTimeframe, 1, needed, high) < needed ||
+      CopyLow(_Symbol, SignalTimeframe, 1, needed, low) < needed ||
+      CopyClose(_Symbol, SignalTimeframe, 1, needed, close) < needed)
      {
-      g_lastSignalBarTime = barTime;
-      PrintFormat("ورود فروش تایید شد: MA(%d) از پایین MA(%d) عبور کرد.", FastMAPeriod, SlowMAPeriod);
-      return ORDER_TYPE_SELL;
+      Print("امکان کپی کردن داده‌ها برای سیگنال ایمپالس وجود ندارد.");
+      return NO_SIGNAL;
      }
+
+   double body = MathAbs(close[0] - open[0]);
+   double range = high[0] - low[0];
+   if(range <= 0) return NO_SIGNAL;
+   if(body < MomentumMinBodyATR * atr || range < MomentumMinRangeATR * atr)
+      return NO_SIGNAL;
+
+   double upperWick = high[0] - MathMax(open[0], close[0]);
+   double lowerWick = MathMin(open[0], close[0]) - low[0];
+   double maxOppositeWick = MathMax(MomentumMaxWickPercent, 0.0) / 100.0 * range;
+   double buffer = MomentumBreakoutBufferPoints * _Point;
+   double highestBefore = high[1];
+   double lowestBefore = low[1];
+   for(int i = 2; i <= lookback; i++)
+     {
+      if(high[i] > highestBefore) highestBefore = high[i];
+      if(low[i] < lowestBefore) lowestBefore = low[i];
+     }
+
+   double fastSlopePoints = (fast[1] - fast[2]) / _Point;
+   bool priceNotOverextended = (MomentumMaxPriceFastATR <= 0.0 ||
+                                MathAbs(close[0] - fast[1]) <= MomentumMaxPriceFastATR * atr);
+   bool buyImpulse = (close[0] > open[0] &&
+                      close[0] > highestBefore + buffer &&
+                      close[0] > fast[1] &&
+                      fastSlopePoints >= MomentumMinFastSlopePoints &&
+                      upperWick <= maxOppositeWick &&
+                      priceNotOverextended);
+   bool sellImpulse = (close[0] < open[0] &&
+                       close[0] < lowestBefore - buffer &&
+                       close[0] < fast[1] &&
+                       fastSlopePoints <= -MomentumMinFastSlopePoints &&
+                       lowerWick <= maxOppositeWick &&
+                       priceNotOverextended);
+
+   if(IsTesterLogEnabled(2) && (buyImpulse || sellImpulse))
+      TesterLog(2, StringFormat("جزئیات ایمپالس | body/ATR=%.2f | range/ATR=%.2f | close=%s | fast=%s | slope=%.1fpt | highBreak=%s | lowBreak=%s",
+                                body / atr,
+                                range / atr,
+                                PriceToText(close[0]),
+                                PriceToText(fast[1]),
+                                fastSlopePoints,
+                                PriceToText(highestBefore),
+                                PriceToText(lowestBefore)));
+
+   if(buyImpulse) return ORDER_TYPE_BUY;
+   if(sellImpulse) return ORDER_TYPE_SELL;
    return NO_SIGNAL;
   }
 //+------------------------------------------------------------------+
@@ -854,7 +936,7 @@ void LogOpenPositionAttempt(const int direction, const double price, const doubl
                              PriceToText(sl),
                              PriceToText(tp));
    Print(msg);
-   if(IsTesterLogEnabled()) TesterLog(msg);
+   TesterLog(2, msg);
   }
 
 void LogOpenPositionFailure(const int direction, const string reason)
@@ -862,7 +944,7 @@ void LogOpenPositionFailure(const int direction, const string reason)
    string dirText = direction == ORDER_TYPE_BUY ? "خرید" : "فروش";
    string msg = StringFormat("باز کردن پوزیشن %s ناموفق شد: %s", dirText, reason);
    Print(msg);
-   if(IsTesterLogEnabled()) TesterLog(msg);
+   TesterLog(1, msg);
   }
 
 void LogOpenPositionSuccess(const int direction, const double lot, const double sl, const double tp)
@@ -875,7 +957,7 @@ void LogOpenPositionSuccess(const int direction, const double lot, const double 
                              PriceToText(tp));
    Print(msg);
    if(IsTesterLogEnabled())
-      TesterLog(StringFormat("ورود موفق | نوع=%s | order=%I64u | deal=%I64u | قیمت اجرا=%s | کد=%d %s",
+      TesterLog(1, StringFormat("ورود موفق | نوع=%s | order=%I64u | deal=%I64u | قیمت اجرا=%s | کد=%d %s",
                              dirText,
                              trade.ResultOrder(),
                              trade.ResultDeal(),
@@ -952,65 +1034,8 @@ bool OpenPosition(const int direction)
       return false;
    return SendMarketOrder(direction, lot, price, sl, tp);
   }
-//+------------------------------------------------------------------+
-//| محاسبه SL جدید — سه روش قابل انتخاب                              |
-//+------------------------------------------------------------------+
-double CalcNewSL(const long posType, const double atr, const double trailDistance)
-  {
-   int    digits     = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   double bid        = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask        = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double currentPrice = (posType == POSITION_TYPE_BUY) ? bid : ask;
 
-   double newSL = 0.0;
-
-   // --- راهکار ۲: Swing High/Low ---
-   if(UseSwingBasedSL)
-     {
-      int lookback = MathMax(SwingLookback, 2);
-      double swingBuffer = SwingBufferPoints * _Point;
-      if(posType == POSITION_TYPE_BUY)
-        {
-         double lowestLow = DBL_MAX;
-         double low[];
-         ArraySetAsSeries(low, true);
-         if(CopyLow(_Symbol, SignalTimeframe, 1, lookback, low) >= lookback)
-           {
-            for(int k = 0; k < lookback; k++)
-               if(low[k] < lowestLow) lowestLow = low[k];
-            newSL = NormalizeDouble(lowestLow - swingBuffer, digits);
-           }
-        }
-      else
-        {
-         double highestHigh = -DBL_MAX;
-         double high[];
-         ArraySetAsSeries(high, true);
-         if(CopyHigh(_Symbol, SignalTimeframe, 1, lookback, high) >= lookback)
-           {
-            for(int k = 0; k < lookback; k++)
-               if(high[k] > highestHigh) highestHigh = high[k];
-            newSL = NormalizeDouble(highestHigh + swingBuffer, digits);
-           }
-        }
-      if(IsTesterLogEnabled() && TesterLogLevel >= 3)
-         TesterLog(StringFormat("SwingSL محاسبه شد: %s", PriceToText(newSL)));
-     }
-
-   // --- راهکار ۱: SLBufferFactor مجزا (یا همان trailDistance اگر غیرفعال) ---
-   if(!UseSwingBasedSL || newSL <= 0)
-     {
-      double slDistance = UseSeparateSLBuffer
-                          ? atr * MathMax(SLBufferFactor, 0.5)
-                          : trailDistance;
-      newSL = (posType == POSITION_TYPE_BUY)
-              ? NormalizeDouble(bid - slDistance, digits)
-              : NormalizeDouble(ask + slDistance, digits);
-     }
-
-   return newSL;
-  }
-
+  
 //+------------------------------------------------------------------+
 //| بررسی و اعمال Breakeven (انتقال SL به نقطه ورود + بافر)          |
 //+------------------------------------------------------------------+
@@ -1057,153 +1082,102 @@ double ApplyBreakevenIfNeeded(const long posType, const double currentSL,
 //| مدیریت تریلینگ بر اساس ATR                                       |
 //+------------------------------------------------------------------+
 void ManageOpenPositions()
-  {
+{
    if(!UseATRTrailing || g_atrHandle == INVALID_HANDLE) return;
    double atr = GetATR();
    if(atr <= 0) return;
 
-   // trailDistance برای TP همچنان از RiskPercent استفاده می‌کند
-   double trailDistance = atr * RiskToATRMultiplier() * GetTrendStrengthFactor();
-   double startDistance = atr * MathMax(TrailStartATR, 0.1);
+   double slDistance = atr * MathMax(SLTrailATRMult, 0.1);
+   double startProfitDist = atr * MathMax(TrailStartATR, 0.05);
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-
-   // --- راهکار ۳: آپدیت SL فقط روی کندل بسته‌شده ---
    datetime currentBar = iTime(_Symbol, SignalTimeframe, 0);
    bool canUpdateSL = !UpdateSLOnBarCloseOnly || (currentBar != g_lastSLBarTime);
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
+   {
       ulong ticket = PositionGetTicket(i);
       if(!PositionSelectByTicket(ticket)) continue;
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
       if((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+
       long type = PositionGetInteger(POSITION_TYPE);
       double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
       double currentSL = PositionGetDouble(POSITION_SL);
-      double currentTP = PositionGetDouble(POSITION_TP);
+      double currentTP = PositionGetDouble(POSITION_TP); // ثابت می‌ماند
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       double currentPrice = (type == POSITION_TYPE_BUY) ? bid : ask;
-      double profitDistance = (type == POSITION_TYPE_BUY) ? bid - openPrice : openPrice - ask;
-      double profitATR = atr > 0 ? profitDistance / atr : 0.0;
+      double profitDist = (type == POSITION_TYPE_BUY) ? (bid - openPrice) : (openPrice - ask);
+      double profitATR = (atr > 0) ? profitDist / atr : 0.0;
 
-      if(IsTesterLogEnabled() && TesterLogLevel >= 2 && currentBar != g_lastTesterTrailLogTime)
-        {
-         TesterLog(StringFormat("وضعیت تریلینگ | تیکت=%I64u | نوع=%s | سود ATR=%.2f | ATR=%s | trailDist=%s | SLDist=%s | SL=%s | TP=%s | canUpdateSL=%s",
-                                ticket,
-                                type == POSITION_TYPE_BUY ? "خرید" : "فروش",
-                                profitATR,
-                                PriceToText(atr),
-                                PriceToText(trailDistance),
-                                UseSeparateSLBuffer ? PriceToText(atr * SLBufferFactor) : PriceToText(trailDistance),
-                                PriceToText(currentSL),
-                                PriceToText(currentTP),
-                                canUpdateSL ? "بله" : "خیر"));
-         g_lastTesterTrailLogTime = currentBar;
-        }
+      // ** Breakeven **
+      if(UseBreakevenProtection && profitDist > 0)
+      {
+         double beTrigger = BreakevenATR * atr;
+         if(profitDist >= beTrigger)
+         {
+            double beSL = 0.0;
+            double buf = BreakevenBufferPoints * _Point;
+            if(type == POSITION_TYPE_BUY)
+               beSL = NormalizeDouble(openPrice + buf, digits);
+            else
+               beSL = NormalizeDouble(openPrice - buf, digits);
+            // فقط اگر بهتر از SL فعلی باشد اعمال کن
+            bool improve = (type == POSITION_TYPE_BUY && (currentSL == 0 || beSL > currentSL)) ||
+                           (type == POSITION_TYPE_SELL && (currentSL == 0 || beSL < currentSL));
+            if(improve)
+            {
+               if(trade.PositionModify(ticket, beSL, currentTP))
+               {
+                  PrintFormat("Breakeven فعال شد: تیکت=%I64u | SL=%s", ticket, PriceToText(beSL));
+                  currentSL = beSL; // برای ادامه‌ی منطق
+               }
+            }
+         }
+      }
 
-      // بستن در سود هدف
-      if(CloseAtProfitATR && profitDistance > 0 && profitATR >= MathMax(CloseProfitATR, 0.1))
-        {
-         TesterLog(StringFormat("بستن کامل در سود هدف | تیکت=%I64u | سود ATR=%.2f", ticket, profitATR));
-         if(!trade.PositionClose(ticket))
-            PrintFormat("بستن پوزیشن در سود هدف ناموفق. تیکت=%I64u | کد=%d %s",
-                        ticket, trade.ResultRetcode(), trade.ResultRetcodeDescription());
-         continue;
-        }
+      // ** تریلینگ اصلی **
+      if(profitDist >= startProfitDist && canUpdateSL)
+      {
+         double newSL = 0.0;
+         if(type == POSITION_TYPE_BUY)
+            newSL = NormalizeDouble(bid - slDistance, digits);
+         else
+            newSL = NormalizeDouble(ask + slDistance, digits);
 
-      double newSL = currentSL;
-      double newTP = currentTP;
+         // SL فقط باید در جهت سود حرکت کند
+         bool improved = false;
+         if(type == POSITION_TYPE_BUY)
+            improved = (currentSL == 0 || newSL > currentSL + _Point); // حداقل ۱ پوینت بهبود
+         else
+            improved = (currentSL == 0 || newSL < currentSL - _Point);
 
-      // --- Breakeven (بدون نیاز به رسیدن به startDistance) ---
-      if(UseBreakevenProtection && profitDistance > 0)
-        {
-         double beSL = ApplyBreakevenIfNeeded(type, currentSL, openPrice, atr);
-         if(beSL != currentSL)
-           {
-            newSL = beSL;
-            // Breakeven همیشه اعمال می‌شود، حتی اگر canUpdateSL false باشد
-            if(ShouldModifyPosition(type, currentSL, currentTP, newSL, currentTP))
-              {
+         if(improved)
+         {
+            // جلوگیری از آپدیت‌های میکروسکوپی (اختیاری، در اینجا ۲ پوینت)
+            double step = 2.0 * _Point;
+            if(currentSL != 0)
+            {
+               double diff = (type == POSITION_TYPE_BUY) ? (newSL - currentSL) : (currentSL - newSL);
+               if(diff < step) improved = false;
+            }
+
+            if(improved)
+            {
                if(trade.PositionModify(ticket, newSL, currentTP))
-                  PrintFormat("Breakeven اعمال شد. تیکت=%I64u | SL=%s", ticket, PriceToText(newSL));
-               else
-                  PrintFormat("اعمال Breakeven ناموفق. تیکت=%I64u | کد=%d", ticket, trade.ResultRetcode());
-              }
-            currentSL = newSL; // به‌روز کردن برای ادامه
-           }
-        }
+               {
+                  PrintFormat("تریلینگ SL | تیکت=%I64u | SL=%s", ticket, PriceToText(newSL));
+                  if(UpdateSLOnBarCloseOnly)
+                     g_lastSLBarTime = currentBar;
+               }
+            }
+         }
+      }
+      // TP هرگز تغییر نمی‌کند
+   }
+}
 
-      // --- تریلینگ اصلی: فقط بعد از startDistance ---
-      if(profitDistance < startDistance) continue;
-
-      // SL جدید (با راهکارهای ۱ و ۲)
-      if(canUpdateSL)
-        {
-         newSL = CalcNewSL(type, atr, trailDistance);
-
-         // SL فقط در جهت سود حرکت کند
-         if(type == POSITION_TYPE_BUY)
-           {
-            if(currentSL > 0 && newSL <= currentSL) newSL = currentSL;
-           }
-         else
-           {
-            if(currentSL > 0 && newSL >= currentSL) newSL = currentSL;
-           }
-        }
-      else
-        {
-         newSL = currentSL; // بدون تغییر SL تا کندل بعدی
-        }
-
-      // TP همچنان هر تیک آپدیت می‌شود (مثل قبل)
-      if(MoveTakeProfitWithTrend)
-        {
-         if(type == POSITION_TYPE_BUY)
-            newTP = NormalizeDouble(bid + trailDistance * MathMax(TakeProfitTrailFactor, 0.5), digits);
-         else
-            newTP = NormalizeDouble(ask - trailDistance * MathMax(TakeProfitTrailFactor, 0.5), digits);
-        }
-
-      EnforceStopsDistance(type, newSL, newTP);
-
-      PrintFormat("[DEBUG] تیکت=%I64u | type=%s | currentSL=%s | newSL=%s | currentTP=%s | newTP=%s | canUpdateSL=%s",
-                  ticket,
-                  type == POSITION_TYPE_BUY ? "BUY" : "SELL",
-                  PriceToText(currentSL),
-                  PriceToText(newSL),
-                  PriceToText(currentTP),
-                  PriceToText(newTP),
-                  canUpdateSL ? "YES" : "NO");
-
-      if(ShouldModifyPosition(type, currentSL, currentTP, newSL, newTP))
-        {
-         if(IsTesterLogEnabled() && TesterLogLevel >= 1)
-           {
-            TesterLog(StringFormat("تغییر تریلینگ | تیکت=%I64u | نوع=%s | SL: %s→%s | TP: %s→%s | سود ATR=%.2f | روش SL=%s",
-                                   ticket,
-                                   type == POSITION_TYPE_BUY ? "خرید" : "فروش",
-                                   PriceToText(currentSL),
-                                   PriceToText(newSL),
-                                   PriceToText(currentTP),
-                                   PriceToText(newTP),
-                                   profitATR,
-                                   UseSwingBasedSL ? "Swing" : (UseSeparateSLBuffer ? "SLBuffer" : "ATR")));
-           }
-         if(trade.PositionModify(ticket, newSL, newTP))
-           {
-            PrintFormat("تریلینگ به‌روزرسانی شد. تیکت=%I64u | SL=%s | TP=%s", ticket, PriceToText(newSL), PriceToText(newTP));
-            if(canUpdateSL && UpdateSLOnBarCloseOnly)
-               g_lastSLBarTime = currentBar; // ثبت کندل آپدیت‌شده
-           }
-         else
-            PrintFormat("به‌روزرسانی تریلینگ ناموفق. تیکت=%I64u | کد=%d %s",
-                        ticket, trade.ResultRetcode(), trade.ResultRetcodeDescription());
-        }
-     }
-  }
-//+------------------------------------------------------------------+
+  //+------------------------------------------------------------------+
 //| بررسی شرایط مجاز بودن معامله                                      |
 //+------------------------------------------------------------------+
 bool IsTradingEnvironmentReady()
@@ -1253,9 +1227,17 @@ bool IsTesterLogEnabled()
   {
    return IsTester() && TesterVerboseLogs;
   }
+bool IsTesterLogEnabled(const int level)
+  {
+   return IsTester() && TesterVerboseLogs && TesterLogLevel >= level;
+  }
 void TesterLog(const string message)
   {
-   if(IsTesterLogEnabled())
+   TesterLog(2, message);
+  }
+void TesterLog(const int level, const string message)
+  {
+   if(IsTesterLogEnabled(level))
       Print("[TESTER] ", message);
   }
 //+------------------------------------------------------------------+
@@ -1306,16 +1288,33 @@ double BuildStopLoss(const int direction, const double entryPrice)
    return NormalizeDouble(sl, digits);
   }
 double BuildTakeProfit(const int direction, const double entryPrice)
-  {
-   if(TakeProfitPoints <= 0) return 0.0;
-   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   double tp = direction == ORDER_TYPE_BUY
-               ? entryPrice + TakeProfitPoints * _Point
-               : entryPrice - TakeProfitPoints * _Point;
-   double sl = 0.0;
-   EnforceStopsDistance(DirectionToPositionType(direction), sl, tp);
-   return NormalizeDouble(tp, digits);
-  }
+{
+   // اگر تریلینگ فعال و TP استاتیک درخواست شده، TP_ATRFactor را به‌کار ببر
+   if(UseATRTrailing && StaticTP_ATRFactor > 0)
+   {
+      double atr = GetATR();
+      if(atr > 0)
+      {
+         int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+         double tp = direction == ORDER_TYPE_BUY
+                     ? entryPrice + atr * StaticTP_ATRFactor
+                     : entryPrice - atr * StaticTP_ATRFactor;
+         return NormalizeDouble(tp, digits);
+      }
+   }
+   // در غیر این صورت از روش قبلی استفاده می‌کند (اگر پارامتر قدیمی TakeProfitPoints تنظیم شده باشد)
+   if(TakeProfitPoints > 0)
+   {
+      int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+      double tp = direction == ORDER_TYPE_BUY
+                  ? entryPrice + TakeProfitPoints * _Point
+                  : entryPrice - TakeProfitPoints * _Point;
+      return NormalizeDouble(tp, digits);
+   }
+   return 0.0;
+}
+
+
 long DirectionToPositionType(const int direction)
   {
    return direction == ORDER_TYPE_BUY ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
@@ -1343,17 +1342,14 @@ void EnforceStopsDistance(const long positionType, double &sl, double &tp)
   }
 double GetATR()
   {
+   if(g_atrHandle == INVALID_HANDLE) return 0.0;
    double atr[];
    ArraySetAsSeries(atr, true);
    if(CopyBuffer(g_atrHandle, 0, 1, 2, atr) < 1)
       return 0.0;
    return atr[0];
   }
-double RiskToATRMultiplier()
-  {
-   double risk = MathMax(0.0, MathMin(RiskPercent, 100.0));
-   return 0.6 + (risk / 100.0) * 2.4;
-  }
+
 double NormalizeLot(const double requestedLot)
   {
    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -1392,33 +1388,22 @@ bool ShouldModifyPosition(const long type, const double currentSL, const double 
    return slChanged || tpChanged;
   }
 
-//+------------------------------------------------------------------+
-//| محاسبه ضریب قدرت روند (۱ تا TrendStrengthMax)                     |
-//+------------------------------------------------------------------+
-double GetTrendStrengthFactor()
-{
-   if(!UseDynamicTrail) return 1.0;
-   
-   double fast[], slow[];
-   ArraySetAsSeries(fast, true);
-   ArraySetAsSeries(slow, true);
-   if(CopyBuffer(g_fastHandle, 0, 0, 2, fast) < 2 ||
-      CopyBuffer(g_slowHandle, 0, 0, 2, slow) < 2)
-      return 1.0;
-      
-   double distanceMA = MathAbs(fast[0] - slow[0]);
-   double atr = GetATR();
-   if(atr <= 0) return 1.0;
-   
-   double strengthRatio = distanceMA / atr;
-   double factor = 1.0 + (MathMin(strengthRatio, 3.0) / 3.0) * (TrendStrengthMax - 1.0);
-   return factor;
-}
+
 string PriceToText(const double price)
   {
    if(price <= 0) return "ندارد";
    return DoubleToString(price, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
   }
+
+string EntrySignalModeText()
+  {
+   if(EntrySignalMode == ENTRY_SIGNAL_CROSS_ONLY)
+      return "فقط کراس";
+   if(EntrySignalMode == ENTRY_SIGNAL_MOMENTUM_ONLY)
+      return "فقط ایمپالس";
+   return "کراس+ایمپالس";
+  }
+
 void PrintOncePerBar(const string message)
   {
    datetime currentBar = iTime(_Symbol, SignalTimeframe, 0);
@@ -1481,20 +1466,20 @@ void DrawStatus(const string mode)
   {
    string symbolStatus = IsSymbolAllowedSilent() ? "مجاز" : "غیرمجاز";
    string trailingStatus = UseATRTrailing ? "تریلینگ ATR فعال" : "تریلینگ ATR غیرفعال";
-   string reEntryStatus = ReEntryInTrend ? "ورود مجدد فعال" : "فقط کراس";
-   string slMethod = UseSwingBasedSL ? "SL:Swing" : (UseSeparateSLBuffer ? StringFormat("SL:%.1fx",SLBufferFactor) : "SL:ATR");
-   string statusText = StringFormat("GoldenTrendTrailEA v%s\nوضعیت: %s\nنماد: %s (%s)\nسیگنال: MA(%d/%d) %s\nپوزیشن‌ها: %d/%d\n%s | %s\n%s",
+   string reEntryStatus = ReEntryInTrend ? "ورود مجدد فعال" : "ورود مجدد غیرفعال";
+   string signalMode = EntrySignalModeText();
+   string statusText = StringFormat("GoldenTrendTrailEA v%s\nوضعیت: %s\nنماد: %s (%s)\nسیگنال: %s MA(%d/%d) %s\nپوزیشن‌ها: %d/%d\n%s | %s",
                                     EA_VERSION,
                                     mode,
                                     _Symbol,
                                     symbolStatus,
+                                    signalMode,
                                     FastMAPeriod,
                                     SlowMAPeriod,
                                     EnumToString(SignalTimeframe),
                                     CountOwnOpenPositions(),
                                     MathMax(MaxOpenPositions, 0),
                                     trailingStatus,
-                                    slMethod,
                                     reEntryStatus);
    Comment("");
    if(ObjectFind(0, LBL_STATE) >= 0)
