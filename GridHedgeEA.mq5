@@ -4,9 +4,10 @@
 //+------------------------------------------------------------------+
 #property copyright "Hamed Movasaqpoor"
 #property link      "hamed.movasaqpoor@gmail.com"
-#property version   "6.11"
+#property version   "6.13"
 
 #include <Trade\Trade.mqh>
+const string EA_VERSION = "6.13";
 
 //------------------------- CAMARILLA RANGE MODES -------------------------
 enum CamarillaRangeMode {
@@ -1794,6 +1795,38 @@ void CheckTotalProfitLoss()
                   totalProfit, openProfit, closedProfit);
       WriteGridReport();
       CloseAll();
+      // نوتیف برای چک دستی اگر به هر دلیل چیزی باقی ماند.
+      int posLeft = 0;
+      int ordLeft = 0;
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         ulong t = PositionGetTicket(i);
+         if(PositionSelectByTicket(t) &&
+            PositionGetInteger(POSITION_MAGIC) == oldMagic &&
+            PositionGetString(POSITION_SYMBOL) == _Symbol)
+            posLeft++;
+        }
+      for(int i = OrdersTotal() - 1; i >= 0; i--)
+        {
+         ulong t = OrderGetTicket(i);
+         if(OrderSelect(t) &&
+            OrderGetInteger(ORDER_MAGIC) == oldMagic &&
+            OrderGetString(ORDER_SYMBOL) == _Symbol)
+            ordLeft++;
+        }
+      {
+       string msg = StringFormat("GridHedgeEA: ✅ حد سود کلی فعال شد. total=%.2f$ (open=%.2f$, closed=%.2f$) | باقی‌مانده: pos=%d, orders=%d. لطفا چک کن اگر چیزی بسته نشد دستی ببند.",
+                                 totalProfit, openProfit, closedProfit, posLeft, ordLeft);
+       SendNotification(msg);
+      }
+      if(AnyGridExists())
+        {
+         Print("⚠️ CloseAll کامل انجام نشد؛ ریست شبکه انجام نشد (ترید متوقف شد).");
+         tradingDone     = true;
+         isTradingActive = false;
+         SaveState();
+         return;
+        }
       g_GridInstance++;
       g_ActiveMagic = MagicNumber + g_GridInstance;
       buyExpansionCount  = 0;
@@ -1816,6 +1849,38 @@ void CheckTotalProfitLoss()
                   totalProfit, openProfit, closedProfit);
       WriteGridReport();
       CloseAll();
+      // نوتیف برای چک دستی اگر به هر دلیل چیزی باقی ماند.
+      int posLeft = 0;
+      int ordLeft = 0;
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         ulong t = PositionGetTicket(i);
+         if(PositionSelectByTicket(t) &&
+            PositionGetInteger(POSITION_MAGIC) == oldMagic &&
+            PositionGetString(POSITION_SYMBOL) == _Symbol)
+            posLeft++;
+        }
+      for(int i = OrdersTotal() - 1; i >= 0; i--)
+        {
+         ulong t = OrderGetTicket(i);
+         if(OrderSelect(t) &&
+            OrderGetInteger(ORDER_MAGIC) == oldMagic &&
+            OrderGetString(ORDER_SYMBOL) == _Symbol)
+            ordLeft++;
+        }
+      {
+       string msg = StringFormat("GridHedgeEA: 🛑 حد ضرر کلی فعال شد. total=%.2f$ (open=%.2f$, closed=%.2f$) | باقی‌مانده: pos=%d, orders=%d. لطفا چک کن اگر چیزی بسته نشد دستی ببند.",
+                                 totalProfit, openProfit, closedProfit, posLeft, ordLeft);
+       SendNotification(msg);
+      }
+      if(AnyGridExists())
+        {
+         Print("⚠️ CloseAll کامل انجام نشد؛ ریست شبکه انجام نشد (ترید متوقف شد).");
+         tradingDone     = true;
+         isTradingActive = false;
+         SaveState();
+         return;
+        }
       g_GridInstance++;
       g_ActiveMagic = MagicNumber + g_GridInstance;
       buyExpansionCount  = 0;
@@ -1875,6 +1940,15 @@ void CheckBasketTrailingStop()
                   profit, g_TrailingStopLevel);
       WriteGridReport(); 
       CloseAll();
+      if(AnyGridExists())
+        {
+         Print("⚠️ CloseAll کامل انجام نشد؛ ریست شبکه انجام نشد (ترید متوقف شد).");
+         tradingDone     = true;
+         isTradingActive = false;
+         ResetTrailingState();
+         SaveState();
+         return;
+        }
       // ریست شبکه (مانند وقتی TP/SL اصلی زده می‌شود)
       int oldMagic = g_ActiveMagic;
       g_GridInstance++;
@@ -1900,6 +1974,15 @@ void CheckBasketTrailingStop()
       PrintFormat("🛑 حد ضرر کل فعال شد: %.2f$ (در حالی که تریلینگ فعال بود). بستن همه...", profit);
       WriteGridReport(); 
       CloseAll();
+      if(AnyGridExists())
+        {
+         Print("⚠️ CloseAll کامل انجام نشد؛ ریست شبکه انجام نشد (ترید متوقف شد).");
+         tradingDone     = true;
+         isTradingActive = false;
+         ResetTrailingState();
+         SaveState();
+         return;
+        }
       int oldMagic = g_ActiveMagic;
       g_GridInstance++;
       g_ActiveMagic = MagicNumber + g_GridInstance;
@@ -1925,18 +2008,69 @@ void CloseAll()
    double currentPrice = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) + 
                           SymbolInfoDouble(_Symbol, SYMBOL_BID)) / 2.0;
 
-   // اول سفارشات معلق رو async حذف کن (سریع)
+   // نسخه سریع (همان حالت قبلی): حذف اوردرهای معلق و بستن همه پوزیشن‌ها به صورت async یکجا
    bool anyDeleted = false;
    DeleteOrdersNearestFirst(currentPrice, anyDeleted);
 
-   // بعد پوزیشن‌ها رو async ببند تا ارسال سریع‌تری داشته باشیم
    bool anyClosed = false;
    ClosePositionsNearestFirst(currentPrice, anyClosed);
 
-   if(AnyGridExists())
-      Print("⚠️ برخی پوزیشن‌ها بسته نشدند - در تیک بعدی دوباره تلاش می‌شود.");
-   else
+   if(!AnyGridExists())
+     {
       Print("✅ تمامی پوزیشن‌ها و سفارشات بسته شدند.");
+      return;
+     }
+
+   // اگر به هر دلیل بعضی‌ها بسته نشدند، فقط برای باقی‌مانده‌ها retry کنیم.
+   const int retryEveryMs = 1000;
+   const int maxRetries   = 30;   // مجموعا حدود ۳۰ ثانیه
+
+   for(int attempt = 0; attempt < maxRetries; attempt++)
+     {
+      if(!AnyGridExists())
+        {
+         Print("✅ CloseAll با retry کامل شد.");
+         return;
+        }
+
+      currentPrice = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) +
+                       SymbolInfoDouble(_Symbol, SYMBOL_BID)) / 2.0;
+
+      // حذف مجدد سفارش‌های معلق
+      anyDeleted = false;
+      DeleteOrdersNearestFirst(currentPrice, anyDeleted);
+
+      // retry: بستن باقی‌مانده‌ها به صورت سینک/دونه‌دونه (برای اطمینان)
+      bool anyClosedRetry = false;
+      ClosePositionsNearestFirstBlocking(currentPrice, anyClosedRetry);
+
+      Sleep(retryEveryMs);
+     }
+
+   // اگر هنوز چیزی باقی ماند، نوتیف بفرست
+   int posCount = 0;
+   int ordCount = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(PositionSelectByTicket(t) &&
+         PositionGetInteger(POSITION_MAGIC) == g_ActiveMagic &&
+         PositionGetString(POSITION_SYMBOL) == _Symbol)
+         posCount++;
+     }
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(OrderSelect(t) &&
+         OrderGetInteger(ORDER_MAGIC) == g_ActiveMagic &&
+         OrderGetString(ORDER_SYMBOL) == _Symbol)
+         ordCount++;
+     }
+
+   string msg = StringFormat("⚠️ CloseAll retry: بعد از %d تلاشِ ۱ثانیه‌ای، هنوز باقی‌مانده هست. Pos=%d, Orders=%d, Symbol=%s, Magic=%d",
+                             maxRetries, posCount, ordCount, _Symbol, g_ActiveMagic);
+   Print(msg);
+   SendNotification(msg);
 }
 
 //+------------------------------------------------------------------+
@@ -2019,6 +2153,85 @@ void ClosePositionsNearestFirst(double currentPrice, bool &anyClosed)
 
    if(sentCount > 0)
       PrintFormat("✅ %d دستور بستن پوزیشن به‌صورت async ارسال شد.", sentCount);
+}
+
+//+------------------------------------------------------------------+
+//| بستن پوزیشن‌ها به ترتیب نزدیک‌ترین به قیمت فعلی (سینک)        |
+//| این نسخه برای اطمینان از بسته شدن کامل استفاده می‌شود.         |
+//+------------------------------------------------------------------+
+void ClosePositionsNearestFirstBlocking(double currentPrice, bool &anyClosed)
+{
+   int count = 0;
+   double distances[];
+   ulong tickets[];
+   double volumes[];
+   long   types[];
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(PositionSelectByTicket(t) &&
+         PositionGetInteger(POSITION_MAGIC) == g_ActiveMagic &&
+         PositionGetString(POSITION_SYMBOL) == _Symbol)
+      {
+         double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+         ArrayResize(distances, count + 1);
+         ArrayResize(tickets, count + 1);
+         ArrayResize(volumes, count + 1);
+         ArrayResize(types, count + 1);
+
+         distances[count] = MathAbs(openPrice - currentPrice);
+         tickets[count]   = t;
+         volumes[count]   = PositionGetDouble(POSITION_VOLUME);
+         types[count]     = PositionGetInteger(POSITION_TYPE);
+         count++;
+      }
+   }
+
+   for(int i = 0; i < count - 1; i++)
+      for(int j = i + 1; j < count; j++)
+         if(distances[j] < distances[i])
+         {
+            double tmpD = distances[i]; distances[i] = distances[j]; distances[j] = tmpD;
+            ulong  tmpT = tickets[i];  tickets[i]  = tickets[j];  tickets[j]  = tmpT;
+            double tmpV = volumes[i];  volumes[i]  = volumes[j];  volumes[j]  = tmpV;
+            long   tmpTy = types[i];   types[i]    = types[j];   types[j]    = tmpTy;
+         }
+
+   if(count == 0) return;
+
+   anyClosed = false;
+   for(int i = 0; i < count; i++)
+   {
+      double closePrice = (types[i] == POSITION_TYPE_BUY)
+                           ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                           : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+      MqlTradeRequest req = {};
+      MqlTradeResult  res = {};
+
+      req.action       = TRADE_ACTION_DEAL;
+      req.position     = tickets[i];
+      req.symbol       = _Symbol;
+      req.volume       = volumes[i];
+      req.price        = closePrice;
+      req.type         = (types[i] == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+      req.magic        = g_ActiveMagic;
+      req.deviation    = 50;
+      req.type_filling = ORDER_FILLING_FOK;
+      req.type_time    = ORDER_TIME_GTC;
+
+      ResetLastError();
+      if(OrderSend(req, res))
+        {
+         anyClosed = true;
+        }
+      else
+        {
+         PrintFormat("❌ CloseAll (blocking) - پوزیشن بسته نشد: ticket=%I64u err=%d retcode=%d",
+                     tickets[i], GetLastError(), res.retcode);
+        }
+   }
 }
 //+------------------------------------------------------------------+
 //| حذف سفارشات معلق به ترتیب نزدیک‌ترین به قیمت فعلی             |
@@ -2105,6 +2318,15 @@ void CloseAllGrid()
    int oldMagic = g_ActiveMagic;
    WriteGridReport();
    CloseAll();
+   if(AnyGridExists())
+     {
+      Print("⚠️ CloseAllGrid: هنوز پوزیشن/اوردر باقی مانده؛ ریست شبکه انجام نشد (ترید متوقف شد).");
+      isTradingActive = false;
+      tradingDone     = true;
+      ResetTrailingState();
+      SaveState();
+      return;
+     }
    g_GridInstance++;
    g_ActiveMagic = MagicNumber + g_GridInstance;
    buyExpansionCount  = 0;
@@ -2240,6 +2462,7 @@ bool IsMarketOpen()
 void UpdateChartComment()
   {
    string commentText = "";
+   const string eaVersion = "v" + EA_VERSION;
    int liveDirection = RefreshLiveTrendDirection(false);
    int midDirection = RefreshMidTrendDirection(false);
    int displayDirection = (isTradingActive && !tradingDone && g_GridDirection != -1)
@@ -2254,6 +2477,7 @@ void UpdateChartComment()
    if(!isTradingActive)
      {
       commentText = "═════ GridHedge Ultimate ═════\n"
+              "🏷️ نسخه: " + eaVersion + "\n"
               "🔴 شبکه غیرفعال است.\n"
               "برای شروع، دکمه «شروع شبکه» را بزنید.\n\n";
       commentText += "🧭 روند کوتاه " + TrendTimeframeText(ShortTrendTF) + " : " + shortTrendStr + "\n";
@@ -2266,6 +2490,7 @@ void UpdateChartComment()
    if(tradingDone)
      {
       commentText = "═════ GridHedge Ultimate ═════\n"
+              "🏷️ نسخه: " + eaVersion + "\n"
               "✅ شبکه پایان یافته (هدف سود یا حد ضرر رسیده).\n"
               "برای شروع مجدد، دکمه «شروع شبکه» را بزنید.\n\n";
       commentText += "🧭 روند کوتاه " + TrendTimeframeText(ShortTrendTF) + " : " + shortTrendStr + "\n";
@@ -2314,6 +2539,7 @@ void UpdateChartComment()
      }
 
    commentText += "═══════ GridHedge Ultimate ═══════\n";
+   commentText += "🏷️ نسخه : " + eaVersion + "\n";
    commentText += "🔢 Magic   : " + IntegerToString(g_ActiveMagic) + "\n";
    commentText += "🏷️ شناسه   : " + g_GridID + "\n";
    commentText += "🧭 جهت شبکه: " + directionStr + "\n";
@@ -2483,7 +2709,7 @@ double EstimateTrailingActivationPrice(double targetProfit)
          PositionGetString(POSITION_SYMBOL) == _Symbol)
         {
          double vol = PositionGetDouble(POSITION_VOLUME); // lots
-         int    ptype = PositionGetInteger(POSITION_TYPE);
+         long   ptype = PositionGetInteger(POSITION_TYPE);
          double dir = (ptype == POSITION_TYPE_BUY) ? 1.0 : -1.0;
          // tickValue per tickSize for 1 lot -> per 1 price unit multiply by volume
          sensitivity += dir * vol * (tickValue / tickSize);
