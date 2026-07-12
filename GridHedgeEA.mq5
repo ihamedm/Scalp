@@ -39,6 +39,8 @@ input int              TrendNotifyCooldownSec  = 300;      // فاصله حدا�
 
 input group "=== معاملات ==="
 input double FixedLot          = 0.01;     // حجم ثابت هر پله لات
+input string BuyLotSteps       = "";       // حجم پله‌های خرید (0.01,0.02,...) خالی=حجم ثابت
+input string SellLotSteps      = "";       // حجم پله‌های فروش (0.01,0.02,...) خالی=حجم ثابت
 input double SL_Points         = 0;        // حد ضرر هر پله (Point)
 input double TP_Points         = 100.0;    // حد سود هر پله (Point)
 input int    GridLevels        = 1;         // تعداد پله های اولیه (استفاده برای سازگاری با قبل)
@@ -123,6 +125,8 @@ double RSI_SellMin         = 35.0;      // حداقل RSI برای فروش (ب�
 
 // حجم لات قابل تعدیل
 double g_CurrentLot = 0.01;      // حجم فعلی لات (جایگزین FixedLot)
+double g_BuyLots[];              // حجم پله‌های خرید (پارس شده از BuyLotSteps)
+double g_SellLots[];             // حجم پله‌های فروش (پارس شده از SellLotSteps)
 
 
 double g_PeakProfit        = 0.0;    // اوج سود شناور (برای تریلینگ)
@@ -279,14 +283,6 @@ void PrintSymbolInfo()
    PrintFormat("  TP فاصله    = %.5f $ (%.0f Point)", TP_Points * _Point, TP_Points);
   }
 
-//+------------------------------------------------------------------+
-//| محاسبه حجم لات (همیشه ثابت، بدون درصد ریسک)                    |
-//+------------------------------------------------------------------+
-double CalcLot(double slPoints)
-  {
-   return g_CurrentLot;
-  }
-
 double GetLotStep()
   {
    double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
@@ -303,6 +299,106 @@ double NormalizeLotVolume(double lot)
    lot = MathFloor(lot / step + 0.0000001) * step;
    lot = MathMax(minLot, MathMin(maxLot, lot));
    return NormalizeDouble(lot, 8);
+  }
+
+//+------------------------------------------------------------------+
+//| پارس رشته حجم پله‌ها (مثلا 0.01,0.02,0.03)                      |
+//+------------------------------------------------------------------+
+bool ParseLotSteps(const string raw, double &lots[])
+  {
+   ArrayResize(lots, 0);
+   string s = raw;
+   StringTrimLeft(s);
+   StringTrimRight(s);
+   if(s == "") return false;
+
+   string parts[];
+   int n = StringSplit(s, ',', parts);
+   if(n <= 0) return false;
+
+   for(int i = 0; i < n; i++)
+     {
+      string part = parts[i];
+      StringTrimLeft(part);
+      StringTrimRight(part);
+      if(part == "") continue;
+
+      double v = StringToDouble(part);
+      if(v <= 0.0) continue;
+
+      int sz = ArraySize(lots);
+      ArrayResize(lots, sz + 1);
+      lots[sz] = NormalizeLotVolume(v);
+     }
+
+   return ArraySize(lots) > 0;
+  }
+
+void InitLotStepArrays()
+  {
+   bool buyParsed = ParseLotSteps(BuyLotSteps, g_BuyLots);
+   bool sellParsed = ParseLotSteps(SellLotSteps, g_SellLots);
+
+   if(buyParsed)
+      PrintFormat("📦 حجم پله‌های خرید: %d مقدار (آخرین=%.3f)", ArraySize(g_BuyLots), g_BuyLots[ArraySize(g_BuyLots)-1]);
+   if(sellParsed)
+      PrintFormat("📦 حجم پله‌های فروش: %d مقدار (آخرین=%.3f)", ArraySize(g_SellLots), g_SellLots[ArraySize(g_SellLots)-1]);
+  }
+
+bool HasVariableBuyLots()
+  {
+   return ArraySize(g_BuyLots) > 0;
+  }
+
+bool HasVariableSellLots()
+  {
+   return ArraySize(g_SellLots) > 0;
+  }
+
+string GetLotDisplayText()
+  {
+   if(!HasVariableBuyLots() && !HasVariableSellLots())
+      return "📦 حجم لات : " + DoubleToString(g_CurrentLot, 3) + "\n";
+
+   string text = "📦 حجم لات : ";
+   if(HasVariableBuyLots())
+      text += "خرید متغیر (" + IntegerToString(ArraySize(g_BuyLots)) + " پله)";
+   else
+      text += "خرید " + DoubleToString(g_CurrentLot, 3);
+
+   text += " | ";
+
+   if(HasVariableSellLots())
+      text += "فروش متغیر (" + IntegerToString(ArraySize(g_SellLots)) + " پله)";
+   else
+      text += "فروش " + DoubleToString(g_CurrentLot, 3);
+
+   return text + "\n";
+  }
+
+//+------------------------------------------------------------------+
+//| حجم لات برای پله N (۱=اولین پله) در سمت خرید یا فروش            |
+//+------------------------------------------------------------------+
+double CalcLotForSide(bool isBuy, int level)
+  {
+   if(level < 1) level = 1;
+
+   int size = isBuy ? ArraySize(g_BuyLots) : ArraySize(g_SellLots);
+   if(size == 0)
+      return g_CurrentLot;
+
+   int idx = level - 1;
+   if(idx >= size) idx = size - 1;
+
+   return isBuy ? g_BuyLots[idx] : g_SellLots[idx];
+  }
+
+//+------------------------------------------------------------------+
+//| محاسبه حجم لات (سازگاری با کد قبلی)                             |
+//+------------------------------------------------------------------+
+double CalcLot(double slPoints)
+  {
+   return g_CurrentLot;
   }
 
 bool IncreaseCurrentLot()
@@ -467,6 +563,8 @@ int OnInit()
       g_EnableStartTimer = EnableStartTimer;
       g_LastTimerTriggeredDate = 0;
     }
+
+   InitLotStepArrays();
 
     // ShowCamarillaLevelsOnChart();
 
@@ -986,12 +1084,12 @@ void ExecuteStrategy()
       // پله اول خرید
       double sl_buy = (SL_Points > 0) ? PointToPrice(ask, SL_Points, true,  true) : 0;
       double tp_buy = (TP_Points > 0) ? PointToPrice(ask, TP_Points, false, true) : 0;
-      PlaceInitialLimit(ORDER_TYPE_BUY, g_CurrentLot, sl_buy, tp_buy, "اولیه");
+      PlaceInitialLimit(ORDER_TYPE_BUY, CalcLotForSide(true, 1), sl_buy, tp_buy, "اولیه");
       
       // پله اول فروش
       double sl_sell = (SL_Points > 0) ? PointToPrice(bid, SL_Points, true,  false) : 0;
       double tp_sell = (TP_Points > 0) ? PointToPrice(bid, TP_Points, false, false) : 0;
-      PlaceInitialLimit(ORDER_TYPE_SELL, g_CurrentLot, sl_sell, tp_sell, "اولیه");
+      PlaceInitialLimit(ORDER_TYPE_SELL, CalcLotForSide(false, 1), sl_sell, tp_sell, "اولیه");
       
       g_GridDirection = -1; // حالت خاص: هر دو سمت
      }
@@ -1015,14 +1113,14 @@ void ExecuteStrategy()
          g_GridDirection = direction;
          double sl = (SL_Points > 0) ? PointToPrice(ask, SL_Points, true,  true) : 0;
          double tp = (TP_Points > 0) ? PointToPrice(ask, TP_Points, false, true) : 0;
-         PlaceInitialLimit(ORDER_TYPE_BUY, g_CurrentLot, sl, tp, "اولیه");
+         PlaceInitialLimit(ORDER_TYPE_BUY, CalcLotForSide(true, 1), sl, tp, "اولیه");
         }
       else
         {
          g_GridDirection = direction;
          double sl = (SL_Points > 0) ? PointToPrice(bid, SL_Points, true,  false) : 0;
          double tp = (TP_Points > 0) ? PointToPrice(bid, TP_Points, false, false) : 0;
-         PlaceInitialLimit(ORDER_TYPE_SELL, g_CurrentLot, sl, tp, "اولیه");
+         PlaceInitialLimit(ORDER_TYPE_SELL, CalcLotForSide(false, 1), sl, tp, "اولیه");
         }
      }
 
@@ -1373,7 +1471,7 @@ void PlaceGrid()
         {
          double entry = ask + i * step;
          if(entry - ask < minDist) entry = ask + minDist;
-         double lot = CalcLot(SL_Points);
+         double lot = CalcLotForSide(true, i);
          double sl  = (SL_Points > 0) ? PointToPrice(entry, SL_Points, true,  true) : 0;
          double tp  = (TP_Points > 0) ? PointToPrice(entry, TP_Points, false, true) : 0;
          PlacePendingOrder(ORDER_TYPE_BUY_STOP, lot, entry, sl, tp, "خرید");
@@ -1385,7 +1483,7 @@ void PlaceGrid()
         {
          double entry = bid - i * step;
          if(bid - entry < minDist) entry = bid - minDist;
-         double lot = CalcLot(SL_Points);
+         double lot = CalcLotForSide(false, i);
          double sl  = (SL_Points > 0) ? PointToPrice(entry, SL_Points, true,  false) : 0;
          double tp  = (TP_Points > 0) ? PointToPrice(entry, TP_Points, false, false) : 0;
          PlacePendingOrder(ORDER_TYPE_SELL_STOP, lot, entry, sl, tp, "فروش");
@@ -1400,7 +1498,7 @@ void PlaceGrid()
            {
             double entry = ask + i * step;
             if(entry - ask < minDist) entry = ask + minDist;
-            double lot = CalcLot(SL_Points);
+            double lot = CalcLotForSide(true, i);
             double sl  = (SL_Points > 0) ? PointToPrice(entry, SL_Points, true,  true) : 0;
             double tp  = (TP_Points > 0) ? PointToPrice(entry, TP_Points, false, true) : 0;
             PlacePendingOrder(ORDER_TYPE_BUY_STOP, lot, entry, sl, tp, "خرید");
@@ -1409,7 +1507,7 @@ void PlaceGrid()
            {
             double entry = bid - i * step;
             if(bid - entry < minDist) entry = bid - minDist;
-            double lot = CalcLot(SL_Points);
+            double lot = CalcLotForSide(false, i);
             double sl  = (SL_Points > 0) ? PointToPrice(entry, SL_Points, true,  false) : 0;
             double tp  = (TP_Points > 0) ? PointToPrice(entry, TP_Points, false, false) : 0;
             PlacePendingOrder(ORDER_TYPE_SELL_STOP, lot, entry, sl, tp, "فروش");
@@ -1627,7 +1725,8 @@ bool BuyAdjustment()
   }
 
    // ثبت سفارش
-   double lot = CalcLot(SL_Points);
+   int nextLevel = CountBuyGridSteps() + 1;
+   double lot = CalcLotForSide(true, nextLevel);
    double sl  = (SL_Points > 0) ? PointToPrice(candidate, SL_Points, true,  true) : 0;
    double tp  = (TP_Points > 0) ? PointToPrice(candidate, TP_Points, false, true) : 0;
    if(PlacePendingOrder(ORDER_TYPE_BUY_STOP, lot, candidate, sl, tp, "خرید"))
@@ -1665,7 +1764,8 @@ bool SellAdjustment()
   }
   
   // ثبت سفارش
-   double lot = CalcLot(SL_Points);
+   int nextLevel = CountSellGridSteps() + 1;
+   double lot = CalcLotForSide(false, nextLevel);
    double sl  = (SL_Points > 0) ? PointToPrice(candidate, SL_Points, true,  false) : 0;
    double tp  = (TP_Points > 0) ? PointToPrice(candidate, TP_Points, false, false) : 0;
    if(PlacePendingOrder(ORDER_TYPE_SELL_STOP, lot, candidate, sl, tp, "فروش"))
@@ -1726,6 +1826,38 @@ int CountPositionsByType(long type)
          PositionGetInteger(POSITION_MAGIC) == g_ActiveMagic &&
          PositionGetString(POSITION_SYMBOL) == _Symbol &&
          PositionGetInteger(POSITION_TYPE)  == type)
+         count++;
+     }
+   return count;
+  }
+
+int CountBuyGridSteps()
+  {
+   int count = CountPositionsByType(POSITION_TYPE_BUY);
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(!OrderSelect(t)) continue;
+      if(OrderGetInteger(ORDER_MAGIC) != g_ActiveMagic) continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
+      ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      if(type == ORDER_TYPE_BUY_STOP || type == ORDER_TYPE_BUY_LIMIT)
+         count++;
+     }
+   return count;
+  }
+
+int CountSellGridSteps()
+  {
+   int count = CountPositionsByType(POSITION_TYPE_SELL);
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(!OrderSelect(t)) continue;
+      if(OrderGetInteger(ORDER_MAGIC) != g_ActiveMagic) continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
+      ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      if(type == ORDER_TYPE_SELL_STOP || type == ORDER_TYPE_SELL_LIMIT)
          count++;
      }
    return count;
@@ -2480,6 +2612,7 @@ void UpdateChartComment()
               "🏷️ نسخه: " + eaVersion + "\n"
               "🔴 شبکه غیرفعال است.\n"
               "برای شروع، دکمه «شروع شبکه» را بزنید.\n\n";
+      commentText += GetLotDisplayText();
       commentText += "🧭 روند کوتاه " + TrendTimeframeText(ShortTrendTF) + " : " + shortTrendStr + "\n";
       commentText += "🧭 روند میانی " + TrendTimeframeText(MidTrendTF) + " : " + midTrendStr + "\n";
       string timerStatus = g_EnableStartTimer ? "فعال" : "غیرفعال";
@@ -2493,6 +2626,7 @@ void UpdateChartComment()
               "🏷️ نسخه: " + eaVersion + "\n"
               "✅ شبکه پایان یافته (هدف سود یا حد ضرر رسیده).\n"
               "برای شروع مجدد، دکمه «شروع شبکه» را بزنید.\n\n";
+      commentText += GetLotDisplayText();
       commentText += "🧭 روند کوتاه " + TrendTimeframeText(ShortTrendTF) + " : " + shortTrendStr + "\n";
       commentText += "🧭 روند میانی " + TrendTimeframeText(MidTrendTF) + " : " + midTrendStr + "\n";
       string timerStatus = g_EnableStartTimer ? "فعال" : "غیرفعال";
@@ -2545,7 +2679,7 @@ void UpdateChartComment()
    commentText += "🧭 جهت شبکه: " + directionStr + "\n";
    commentText += "🧭 روند کوتاه " + TrendTimeframeText(ShortTrendTF) + " : " + shortTrendStr + "\n";
    commentText += "🧭 روند میانی " + TrendTimeframeText(MidTrendTF) + " : " + midTrendStr + "\n";
-   commentText += "📦 حجم لات : " + DoubleToString(g_CurrentLot, 3) + "\n";
+   commentText += GetLotDisplayText();
    commentText += "📊 پوزیشن‌ها: " + IntegerToString(totalPos) + "  ( خرید:" + IntegerToString(buyPos) + " | فروش:" + IntegerToString(sellPos) + " )\n";
    commentText += "⏳ سفارشات : Buy Stop:" + IntegerToString(buyOrders) + " | Sell Stop:" + IntegerToString(sellOrders) + "\n";
    commentText += "💰 سود/زیان باز: " + DoubleToString(totalProfit, 2) + " $\n";
